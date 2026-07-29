@@ -1,33 +1,31 @@
-<!DOCTYPE html>
+<!doctype html>
 <html dir="ltr" lang="en-GB">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
-    <title>
-        Kadmos
-    </title>
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0"
+    />
+    <title>Kadmos</title>
 
-    <link rel="stylesheet" type="text/css" href="styles.css">
-</head>
-<body>
-
-<div id="kadmos-app">
-    <div id="kadmos-spinner">
+    <link rel="stylesheet" type="text/css" href="styles.css" />
+  </head>
+  <body>
+    <div id="kadmos-app">
+      <div id="kadmos-spinner">
         <div class="spinner">
-            <div class="dot1"></div>
-            <div class="dot2"></div>
+          <div class="dot1"></div>
+          <div class="dot2"></div>
         </div>
+      </div>
+
+      <div id="kadmos-content"></div>
+
+      <div id="kadmos-error-wrapper">
+        <div id="kadmos-error"></div>
+      </div>
     </div>
 
-    <div id="kadmos-content"></div>
-
-    <div id="kadmos-error-wrapper">
-        <div id="kadmos-error">
-
-        </div>
-    </div>
-</div>
-
-<script type="module" src="app.ts"></script>
-</body>
+    <script type="module" src="app.ts"></script>
+  </body>
 </html>

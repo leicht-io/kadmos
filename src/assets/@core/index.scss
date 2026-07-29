@@ -1,4 +1,3 @@
-@import "./spinner";
-@import "./stl";
-@import "./errors";
-
+@forward "./spinner";
+@forward "./stl";
+@forward "./errors";

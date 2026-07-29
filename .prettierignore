@@ -1,0 +1,5 @@
+dist
+examples/dist
+.parcel-cache
+node_modules
+src/assets/styles.css

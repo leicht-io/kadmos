@@ -1,1 +1,1 @@
-export * from "./Kadmos";
+export * from "./Kadmos.js";

@@ -1,1 +1,0 @@
-export Kadmos from "./dist";

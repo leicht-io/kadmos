@@ -4,41 +4,55 @@
   right: 0;
   bottom: 0;
   top: 0;
-  background: #f9f9f9;
-  visibility: visible;
-  opacity: 1;
-  transition: all 0.250s linear;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  background: var(--kadmos-bg);
+  visibility: hidden;
+  opacity: 0;
+  transition:
+    opacity 0.25s linear,
+    visibility 0.25s linear;
 
-  &.kadmos-spinner--hidden {
-    visibility: hidden;
-    opacity: 0;
-    transition: all 0.250s linear;
+  &.kadmos-spinner--visible {
+    visibility: visible;
+    opacity: 1;
   }
 
   .spinner {
     width: 40px;
     height: 40px;
-    position: absolute;
-    text-align: center;
-    animation: sk-rotate 2.0s infinite linear;
-    left: calc(50% - 20px);
-    top: calc(50% - 20px);
+    position: relative;
+    animation: sk-rotate 2s infinite linear;
 
-    .dot1, .dot2 {
+    .dot1,
+    .dot2 {
       width: 60%;
       height: 60%;
       display: inline-block;
       position: absolute;
       top: 0;
-      background-color: #546e7a;
+      background-color: var(--kadmos-accent);
       border-radius: 100%;
-      animation: sk-bounce 2.0s infinite ease-in-out;
+      animation: sk-bounce 2s infinite ease-in-out;
     }
 
     .dot2 {
       top: auto;
       bottom: 0;
-      animation-delay: -1.0s;
+      animation-delay: -1s;
     }
+  }
+
+  .kadmos-spinner-progress {
+    min-height: 1em;
+    font-family: var(--kadmos-font);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--kadmos-muted);
   }
 }

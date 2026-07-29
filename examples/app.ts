@@ -1,14 +1,14 @@
-import {Kadmos} from "../src";
+import { Kadmos } from "../src";
 
 export class App {
-    constructor() {
-        this.startKadmos();
-    }
+  constructor() {
+    this.startKadmos();
+  }
 
-    startKadmos(): void {
-        // Example: http://localhost:1234/?fileUrl=https://ni.leicht.io/bg_1000_handle.stl&color=0x333333
-        Kadmos.initFromUrl();
-    }
+  startKadmos(): void {
+    // http://localhost:1234/?fileUrl=https://example.com/model.stl&color=0x333333
+    Kadmos.initFromUrl();
+  }
 }
 
 new App();

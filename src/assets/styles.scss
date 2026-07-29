@@ -1,3 +1,6 @@
+@use "./animations" as *;
+@use "./@core" as *;
+
 #kadmos-app {
   position: fixed;
   left: 0;
@@ -5,6 +8,26 @@
   bottom: 0;
   top: 0;
 
-  @import "./animations";
-  @import "./@core";
+  --kadmos-bg: #f5f6f8;
+  --kadmos-surface: #ffffff;
+  --kadmos-fg: #1e2530;
+  --kadmos-muted: #64748b;
+  --kadmos-accent: #6366f1;
+  --kadmos-error: #dc2626;
+  --kadmos-radius: 10px;
+  --kadmos-font:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+
+  font-family: var(--kadmos-font);
+  color: var(--kadmos-fg);
+
+  @media (prefers-color-scheme: dark) {
+    --kadmos-bg: #14161a;
+    --kadmos-surface: #1c1f26;
+    --kadmos-fg: #e5e7eb;
+    --kadmos-muted: #9ca3af;
+    --kadmos-accent: #818cf8;
+    --kadmos-error: #f87171;
+  }
 }
