@@ -4,8 +4,17 @@ import { ThreeMFLoader } from "three/addons/loaders/3MFLoader.js";
 import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
 import { unzipSync } from "three/addons/libs/fflate.module.js";
 
+/** Default limit for both the download and a 3MF's unpacked contents. */
+export const DEFAULT_MAX_FILE_SIZE = 200 * 1024 * 1024;
+
 export interface LoadOptions {
   signal?: AbortSignal;
+  /**
+   * Largest file to accept, in bytes (default 200 MB). Applies to the
+   * download and to a 3MF's unpacked contents, so a huge file or a zip
+   * bomb fails cleanly instead of exhausting the visitor's memory.
+   */
+  maxFileSize?: number;
   /** Called with the downloaded fraction (0–1) when the size is known. */
   onProgress?: (fraction: number) => void;
 }
@@ -24,6 +33,15 @@ const UNIT_SCALE: Record<string, number> = {
   meter: 1000,
 };
 
+export class ModelTooLargeError extends Error {
+  constructor(readonly limit: number) {
+    super(
+      `Kadmos: model exceeds the ${Math.round(limit / 1024 / 1024)} MB limit`,
+    );
+    this.name = "ModelTooLargeError";
+  }
+}
+
 /**
  * Downloads and parses an STL or 3MF model. The result is in millimeters
  * (STL files are unitless and conventionally authored in millimeters).
@@ -34,8 +52,16 @@ export async function loadModel(
   url: string,
   options: LoadOptions = {},
 ): Promise<Group> {
-  const buffer = await fetchBuffer(url, options);
-  const model = is3mf(url, buffer) ? parse3mf(buffer) : parseStl(buffer);
+  const maxFileSize = options.maxFileSize ?? DEFAULT_MAX_FILE_SIZE;
+  const buffer = await fetchBuffer(
+    url,
+    options.signal,
+    maxFileSize,
+    options.onProgress,
+  );
+  const model = is3mf(url, buffer)
+    ? parse3mf(buffer, maxFileSize)
+    : parseStl(buffer);
 
   model.traverse((child) => {
     if (child instanceof Mesh) {
@@ -52,7 +78,9 @@ export async function loadModel(
 
 async function fetchBuffer(
   url: string,
-  { signal, onProgress }: LoadOptions,
+  signal: AbortSignal | undefined,
+  maxFileSize: number,
+  onProgress: ((fraction: number) => void) | undefined,
 ): Promise<ArrayBuffer> {
   const response = await fetch(url, { signal });
   if (!response.ok) {
@@ -60,10 +88,18 @@ async function fetchBuffer(
   }
 
   const total = Number(response.headers.get("content-length"));
-  if (!response.body || !onProgress || !total) {
+  if (total > maxFileSize) {
+    // Stop the download too, not just the parse.
+    await response.body?.cancel();
+    throw new ModelTooLargeError(maxFileSize);
+  }
+  if (!response.body) {
     return response.arrayBuffer();
   }
 
+  // Streamed rather than response.arrayBuffer(), so progress can be
+  // reported and an oversized body (Content-Length can be absent or
+  // understate a compressed response) is cut off early.
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let loaded = 0;
@@ -76,9 +112,15 @@ async function fetchBuffer(
 
     chunks.push(value);
     loaded += value.byteLength;
-    // Content-Length is the compressed size for gzipped responses, so the
-    // decoded byte count can overshoot it.
-    onProgress(Math.min(1, loaded / total));
+    if (loaded > maxFileSize) {
+      await reader.cancel();
+      throw new ModelTooLargeError(maxFileSize);
+    }
+    if (total) {
+      // Content-Length is the compressed size for gzipped responses, so
+      // the decoded byte count can overshoot it.
+      onProgress?.(Math.min(1, loaded / total));
+    }
   }
 
   const result = new Uint8Array(loaded);
@@ -130,10 +172,12 @@ function parseStl(buffer: ArrayBuffer): Group {
   return group;
 }
 
-function parse3mf(buffer: ArrayBuffer): Group {
+function parse3mf(buffer: ArrayBuffer, maxFileSize: number): Group {
+  // Check before ThreeMFLoader unpacks everything.
+  const unitScale = read3mfUnitScale(buffer, maxFileSize);
   const group = new ThreeMFLoader().parse(buffer);
   // ThreeMFLoader reads the model's unit but never applies it.
-  group.scale.multiplyScalar(read3mfUnitScale(buffer));
+  group.scale.multiplyScalar(unitScale);
 
   return group;
 }
@@ -142,10 +186,24 @@ function parse3mf(buffer: ArrayBuffer): Group {
  * Returns the factor that converts a 3MF file's declared unit to
  * millimeters. This unzips the model part a second time (ThreeMFLoader
  * doesn't expose the unit), which is cheap next to building the meshes.
+ * Throws ModelTooLargeError if the archive's declared unpacked size
+ * exceeds `maxFileSize`; that's checked from the zip directory, before
+ * anything is decompressed.
  */
-export function read3mfUnitScale(buffer: ArrayBuffer): number {
+export function read3mfUnitScale(
+  buffer: ArrayBuffer,
+  maxFileSize = DEFAULT_MAX_FILE_SIZE,
+): number {
+  let unpackedSize = 0;
   const files = unzipSync(new Uint8Array(buffer), {
-    filter: (file) => file.name.toLowerCase().endsWith("3dmodel.model"),
+    filter: (file) => {
+      unpackedSize += file.originalSize;
+      if (unpackedSize > maxFileSize) {
+        throw new ModelTooLargeError(maxFileSize);
+      }
+
+      return file.name.toLowerCase().endsWith("3dmodel.model");
+    },
   });
   const model = Object.values(files)[0];
   if (!model) {

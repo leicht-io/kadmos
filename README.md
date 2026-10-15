@@ -5,8 +5,8 @@
 [![CI](https://github.com/leicht-io/kadmos/actions/workflows/ci.yml/badge.svg)](https://github.com/leicht-io/kadmos/actions/workflows/ci.yml)
 
 A zero-configuration TypeScript library built on [Three.js](https://threejs.org/) that renders 3D models in
-STL and 3MF format, served by URL, in an interactive viewer. Drop it into any page and it wires itself up from
-either a query string or a few `data-*` attributes — no scene, camera, or renderer setup required.
+STL and 3MF format, served by URL, in an interactive viewer. Embed viewers in your page, open them in a popup
+from links, or show one full page from a query string — no scene, camera, or renderer setup required.
 
 The viewer includes:
 
@@ -20,12 +20,13 @@ The viewer includes:
   X, Y or Z, and point-to-point measuring.
 - **Build plate overlay** — shows a printer's bed and build volume and whether the model fits.
 - Orbit controls, auto-rotate, wireframe, auto-fit framing, a loading progress indicator, and light/dark
-  themes that follow the visitor's system setting.
+  themes that follow the visitor's system setting or your site's theme switch.
 
 ### Demo
 
-The included demo application (see [Local development](#local-development)) is a minimal page that only
-exercises query-param mode — visit it with a `fileUrl` param to see the viewer in action.
+The included demo application (see [Local development](#local-development)) has a page per mode, using the
+sample models in [`examples/public/models`](examples/public/models): full page (`/`, or `/?fileUrl=…` for
+your own model), popup (`/popup.html`) and inline (`/inline.html`).
 
 ![Kadmos in use](https://github.com/leicht-io/kadmos/blob/master/examples/graphics/demo-image.PNG?raw=true)
 
@@ -54,8 +55,37 @@ resolve — loading `dist/index.js` directly in a browser will not work. The 3D 
 import { Kadmos } from "kadmos";
 ```
 
-Kadmos looks for a fixed set of host elements in your page and throws a descriptive error when it needs one
-that is missing:
+Kadmos has three modes: **inline** viewers embedded in your page, a **popup** opened from links, and a
+**full-page** viewer driven by the URL.
+
+### 1. Inline mode — `Kadmos.mount(element, options)`
+
+Embeds a viewer in any element. It fills the element, so give the element a size:
+
+```html
+<div id="viewer" style="aspect-ratio: 4 / 3"></div>
+```
+
+```typescript
+const viewer = Kadmos.mount(document.getElementById("viewer")!, {
+  src: "https://example.com/model.3mf",
+  plate: "prusa-mk4",
+  theme: "auto",
+});
+
+await viewer.load("https://example.com/other.stl", { color: "#3b6ea5" });
+viewer.setTheme("dark"); // e.g. from your site's own theme switch
+viewer.destroy(); // removes it and frees its WebGL context
+```
+
+`options` takes `src` plus the [model options](#model-options) and [settings](#settings) below. Each
+mounted viewer shows its own loading and error states, resizes with its element, and stops rendering while
+scrolled out of view. Mount as many as you need; inline mode needs none of the page-level elements below.
+
+### Page-level elements (popup and full-page mode)
+
+Popup and full-page mode use a fixed set of host elements in your page and throw a descriptive error when
+they need one that is missing:
 
 | Element                                              | Purpose                                               |
 | ---------------------------------------------------- | ----------------------------------------------------- |
@@ -65,7 +95,7 @@ that is missing:
 | `#kadmos-content`                                    | Container Kadmos injects its viewer popup into        |
 
 The elements must be in the page by the time the DOM has loaded. Minimal markup (see also
-[`examples/index.html`](examples/index.html)):
+[`examples/popup.html`](examples/popup.html)):
 
 ```html
 <div id="kadmos-app">
@@ -84,7 +114,9 @@ The elements must be in the page by the time the DOM has loaded. Minimal markup 
 </div>
 ```
 
-### 1. Query-param mode — `Kadmos.initFromUrl()`
+Settings for these modes are set once with `Kadmos.configure()` (see [Settings](#settings)).
+
+### 2. Full-page mode — `Kadmos.initFromUrl()`
 
 Loads a model full-page, driven entirely by the URL:
 
@@ -106,7 +138,7 @@ http://localhost:1234/?fileUrl=https://example.com/model.stl&color=0x333333&plat
 
 If `fileUrl` is missing, Kadmos shows the error UI instead of loading anything.
 
-### 2. Popup mode — `Kadmos.initAll(className)`
+### 3. Popup mode — `Kadmos.initAll(className)`
 
 Makes every element with the given class name open the viewer in a popup over the page when clicked:
 
@@ -140,10 +172,38 @@ Clicks are handled by a single delegated listener, so triggers added to the page
 is up to 800×600 and shrinks to fit smaller windows. It closes on the Escape key or a click outside its
 content; a load error closes the same way.
 
-### 3. Programmatic — `Kadmos.handleModel(fileUrl, color?, width?, height?, options?)`
+Opening a popup from your own code: `Kadmos.handleModel(fileUrl, color?, width?, height?, options?)`.
+`width` and `height` set the largest popup size (default 800×600); `options` takes `plate`, `dimensions`
+and `texture`.
 
-Opens a model directly, e.g. from your own UI. `width` and `height` set the largest popup size (default
-800×600). `options` takes `plate`, `dimensions` and `texture`, as above.
+### Model options
+
+Per model, as query params, `data-*` attributes or `mount()`/`load()` options:
+
+| Option       | Description                                                      |
+| ------------ | ---------------------------------------------------------------- |
+| `color`      | Model color, e.g. `0x333333` or `#333333` (see Color format)     |
+| `plate`      | Build plate to show on load (see Build plates)                   |
+| `dimensions` | `false` hides the dimensions overlay on load (shown by default)  |
+| `texture`    | `false` turns the plastic surface texture off (shown by default) |
+
+### Settings
+
+Per page (`Kadmos.configure()`, for popup and full-page mode) or per inline viewer (`mount()` options):
+
+```typescript
+Kadmos.configure({
+  theme: "auto", // "auto" follows the visitor's system setting; or "light" / "dark"
+  accent: "#0d9488", // buttons, spinner and in-scene overlays
+  maxFileSize: 100 * 1024 * 1024, // bytes; default 200 MB
+});
+```
+
+`configure()` can be called again at any time, e.g. when your site's theme switch changes. Files over
+`maxFileSize` — counting a 3MF's unpacked contents, so a zip bomb can't exhaust memory — show an error
+instead of loading. Beyond the accent, the CSS variables on `#kadmos-app` / `.kadmos-inline`
+(`--kadmos-bg`, `--kadmos-surface`, `--kadmos-fg`, `--kadmos-error`, `--kadmos-radius`, `--kadmos-font`, …)
+can be overridden in your own stylesheet.
 
 ### Formats and units
 
@@ -178,7 +238,8 @@ viewer's build plate panel.
 
 ### Viewer controls
 
-The toolbar (bottom-left) has three groups:
+The toolbar (bottom-left) has three groups; on viewers narrower than 560px the four view buttons collapse
+into one menu:
 
 - **View** — reset view, toggle auto-rotate (on by default), toggle wireframe, toggle the surface texture
   (on by default).
@@ -193,9 +254,9 @@ git clone https://github.com/leicht-io/kadmos.git
 cd kadmos
 corepack enable  # uses the Yarn 4 version pinned in package.json
 yarn install
-yarn start         # Vite dev server against examples/
+yarn start         # Vite dev server for the demo pages in examples/
 yarn build         # library build (tsc -> dist/)
-yarn build:app     # production build of the demo app (examples/dist/)
+yarn build:app     # production build of the demo pages (examples/dist/)
 yarn test          # unit tests (Vitest)
 yarn lint          # ESLint
 yarn format        # Prettier (write)

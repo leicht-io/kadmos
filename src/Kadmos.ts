@@ -1,43 +1,27 @@
-// Only types come from the three.js side here: the Viewer module (and
-// three.js with it) is loaded on first use, so pages that merely wire up
-// popup triggers don't download the 3D engine until a model is opened.
-import type { ModelStats } from "./modelStats.js";
-import type { SectionAxis, Viewer, ViewPreset } from "./Viewer.js";
 import {
-  BUILD_PLATES,
-  BuildVolume,
-  FitResult,
-  parseBuildVolume,
-} from "./buildPlates.js";
-import { parseColor } from "./color.js";
-import { formatLength, formatVolume } from "./format.js";
-import { parseFlag } from "./options.js";
-import { ICONS } from "./icons.js";
+  applyHostSettings,
+  describeLoadError,
+  enableTransitionsWhenStyled,
+  whenReady,
+} from "./dom.js";
+import { InlineViewer, KadmosViewer, MountOptions } from "./InlineViewer.js";
+import { ModelOptions, ViewerSettings, ViewerUi } from "./ViewerUi.js";
 
-export interface ModelOptions {
-  /** Build plate preset id (e.g. `prusa-mk4`) or `WxDxH` in millimeters. */
-  plate?: string;
-  /** Show the plastic surface texture (default true). */
-  texture?: boolean | string;
-  /** Show the dimensions overlay on load (default true). */
-  dimensions?: boolean | string;
-}
+export type { KadmosViewer, MountOptions } from "./InlineViewer.js";
+export type { ModelOptions, ThemeSetting, ViewerSettings } from "./ViewerUi.js";
 
 const FADE_MS = 250;
 const POPUP_MARGIN = 32;
-const CUSTOM_PLATE = "custom";
 
 export class Kadmos {
-  private static viewer: Viewer | undefined;
-  private static viewerPromise: Promise<Viewer> | undefined;
+  private static ui: ViewerUi | undefined;
+  private static settings: ViewerSettings = {};
   private static fullPage = false;
   private static requestedSize = { width: 800, height: 600 };
-  private static loadToken = 0;
-  private static loadController: AbortController | undefined;
+  private static openToken = 0;
   private static closeTimer: number | undefined;
   private static popupListenersBound = false;
   private static readonly triggerClasses = new Set<string>();
-  private static customPlate: BuildVolume | undefined;
 
   private static getSpinner(): HTMLElement {
     const element = document.querySelector<HTMLElement>("#kadmos-spinner");
@@ -100,23 +84,43 @@ export class Kadmos {
     }
   }
 
-  private static getModelContainer(): HTMLElement {
-    const element = document.querySelector<HTMLElement>("#stlModel");
-    if (element) {
-      return element;
-    } else {
-      throw new Error("Kadmos Model Container not defined");
-    }
+  /**
+   * Embeds a viewer inside `element`, sized to fill it, so give the
+   * element a height (or an aspect-ratio). Any number of viewers can be
+   * mounted on a page; each is independent of popup and full-page mode.
+   */
+  public static mount(
+    element: HTMLElement,
+    options: MountOptions = {},
+  ): KadmosViewer {
+    return new InlineViewer(element, options);
   }
 
-  private static query<T extends HTMLElement>(selector: string): T | null {
-    return this.getStlWrapper().querySelector<T>(selector);
+  /**
+   * Sets theme, accent color and file size limit for popup and full-page
+   * mode. Can be called before or after initAll()/initFromUrl(), and
+   * again later, e.g. when the site's own theme switch changes.
+   */
+  public static configure(settings: ViewerSettings): void {
+    this.settings = { ...this.settings, ...settings };
+    this.ui?.setTheme(this.settings.theme ?? "auto");
+    if (this.settings.accent) {
+      this.ui?.setAccent(this.settings.accent);
+    }
+    this.ui?.setMaxFileSize(this.settings.maxFileSize);
+
+    whenReady(() => {
+      const app = document.getElementById("kadmos-app");
+      if (app) {
+        applyHostSettings(app, this.settings);
+      }
+    });
   }
 
   public static initFromUrl(): void {
     this.fullPage = true;
 
-    this.whenReady(() => {
+    whenReady(() => {
       this.addPopupTemplateHtmlToDom();
 
       const urlParams = new URLSearchParams(window.location.search);
@@ -143,7 +147,7 @@ export class Kadmos {
   }
 
   public static initAll(className: string): void {
-    this.whenReady(() => {
+    whenReady(() => {
       this.addPopupTemplateHtmlToDom();
       this.bindPopupListeners();
 
@@ -181,84 +185,44 @@ export class Kadmos {
   }
 
   /**
-   * Opens a model in the viewer. In popup mode `width` and `height` are
-   * the largest size the popup grows to; it shrinks to fit the window.
+   * Opens a model in the popup (or the full page, after initFromUrl()).
+   * In popup mode `width` and `height` are the largest size the popup
+   * grows to; it shrinks to fit the window.
    */
   public static handleModel(
     filePath: string,
     color?: string | null,
     width = 800,
     height = 600,
-    options: ModelOptions = {},
+    options: Omit<ModelOptions, "color"> = {},
   ): void {
-    this.addPopupTemplateHtmlToDom();
+    const ui = this.addPopupTemplateHtmlToDom();
     if (!this.fullPage) {
       this.bindPopupListeners();
     }
 
     window.clearTimeout(this.closeTimer);
-    this.loadController?.abort();
-    const controller = new AbortController();
-    this.loadController = controller;
-    const token = ++this.loadToken;
-
+    const token = ++this.openToken;
     this.requestedSize = { width, height };
     this.resetUiState();
+    ui.setSize(...this.fitSize());
 
-    this.getViewer()
-      .then(async (viewer) => {
-        viewer.setSize(...this.fitSize());
-        const stats = await viewer.load(filePath, {
-          color: parseColor(color),
-          signal: controller.signal,
-          onProgress: (fraction) => {
-            if (token === this.loadToken) {
-              this.getSpinnerProgress().textContent = `${Math.round(fraction * 100)}%`;
-            }
-          },
-        });
-
-        if (token !== this.loadToken) {
-          return;
+    ui.load(filePath, { ...options, color }, (fraction) => {
+      this.getSpinnerProgress().textContent = `${Math.round(fraction * 100)}%`;
+    })
+      .then((result) => {
+        if (result === "loaded" && token === this.openToken) {
+          this.revealViewer(token);
         }
-
-        this.resetTools(viewer, stats, options);
-        viewer.start();
-        this.revealViewer(token);
       })
       .catch((error: unknown) => {
-        if (controller.signal.aborted || token !== this.loadToken) {
+        if (token !== this.openToken) {
           return;
         }
 
         console.error(error);
-        this.showError("The model could not be loaded");
+        this.showError(describeLoadError(error));
       });
-  }
-
-  private static getViewer(): Promise<Viewer> {
-    this.viewerPromise ??= import("./Viewer.js").then(
-      ({ Viewer }) => {
-        this.viewer = new Viewer(this.getModelContainer());
-
-        return this.viewer;
-      },
-      (error: unknown) => {
-        // Let a later open retry, e.g. after a dropped connection.
-        this.viewerPromise = undefined;
-        throw error;
-      },
-    );
-
-    return this.viewerPromise;
-  }
-
-  private static whenReady(callback: () => void): void {
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", callback, { once: true });
-    } else {
-      callback();
-    }
   }
 
   private static fitSize(): [number, number] {
@@ -274,111 +238,44 @@ export class Kadmos {
     ];
   }
 
-  private static addPopupTemplateHtmlToDom(): void {
+  private static addPopupTemplateHtmlToDom(): ViewerUi {
     // initFromUrl(), initAll() and handleModel() can all run in the same
     // page; guard against injecting a second, duplicate-ID popup.
-    if (document.getElementById("stlBackdrop")) {
-      return;
+    if (this.ui) {
+      return this.ui;
     }
 
-    const toggle = (action: string, label: string, content: string) =>
-      `<button type="button" class="kadmos-toolbar-button" data-action="${action}" title="${label}" aria-label="${label}" aria-pressed="false">${content}</button>`;
-    const view = (preset: ViewPreset, label: string) =>
-      `<button type="button" class="kadmos-toolbar-button kadmos-toolbar-button--text" data-action="view" data-view="${preset}" title="${label} view">${label}</button>`;
-
-    const backdrop: string =
+    const backdrop =
       '<div id="stlBackdrop">' +
-      '  <div id="stlContent" role="dialog" aria-label="3D model viewer">' +
-      '    <div id="stlModel"></div>' +
-      '    <div class="kadmos-info" aria-live="polite">' +
-      '      <div class="kadmos-info-size"></div>' +
-      '      <div class="kadmos-info-meta"></div>' +
-      '      <div class="kadmos-info-fit" hidden></div>' +
-      "    </div>" +
-      '    <div class="kadmos-panels">' +
-      '      <div class="kadmos-panel" data-panel="section" hidden>' +
-      '        <span class="kadmos-panel-title">Section</span>' +
-      '        <div class="kadmos-segmented" role="group" aria-label="Section axis">' +
-      '          <button type="button" data-axis="x" aria-pressed="false">X</button>' +
-      '          <button type="button" data-axis="y" aria-pressed="false">Y</button>' +
-      '          <button type="button" data-axis="z" aria-pressed="true">Z</button>' +
-      "        </div>" +
-      '        <input type="range" class="kadmos-section-range" min="0" max="1000" value="500" aria-label="Section position">' +
-      "      </div>" +
-      '      <div class="kadmos-panel" data-panel="measure" hidden>' +
-      '        <span class="kadmos-panel-title">Measure</span>' +
-      '        <span class="kadmos-panel-hint">Click two points on the model</span>' +
-      '        <button type="button" class="kadmos-panel-button" data-measure="clear">Clear</button>' +
-      "      </div>" +
-      '      <div class="kadmos-panel" data-panel="plate" hidden>' +
-      '        <label class="kadmos-panel-title" for="kadmos-plate-select">Build plate</label>' +
-      '        <select id="kadmos-plate-select" class="kadmos-plate-select"></select>' +
-      "      </div>" +
-      "    </div>" +
-      '    <div id="stlToolbar" role="toolbar" aria-label="Viewer controls">' +
-      '      <div class="kadmos-toolbar-group">' +
-      `        <button type="button" class="kadmos-toolbar-button" data-action="reset" title="Reset view" aria-label="Reset view">${ICONS.reset}</button>` +
-      `        ${toggle("rotate", "Toggle auto-rotate", ICONS.rotate)}` +
-      `        ${toggle("wireframe", "Toggle wireframe", ICONS.wireframe)}` +
-      `        ${toggle("texture", "Toggle surface texture", ICONS.texture)}` +
-      "      </div>" +
-      '      <div class="kadmos-toolbar-group">' +
-      `        ${view("top", "Top")}${view("front", "Front")}${view("side", "Side")}${view("iso", "Iso")}` +
-      `        ${toggle("ortho", "Toggle orthographic camera", "Ortho").replace('class="kadmos-toolbar-button"', 'class="kadmos-toolbar-button kadmos-toolbar-button--text"')}` +
-      "      </div>" +
-      '      <div class="kadmos-toolbar-group">' +
-      `        ${toggle("dimensions", "Show dimensions", ICONS.dimensions)}` +
-      `        ${toggle("section", "Section view", ICONS.section)}` +
-      `        ${toggle("measure", "Measure distance", ICONS.measure)}` +
-      `        ${toggle("plate", "Show build plate", ICONS.plate)}` +
-      "      </div>" +
-      "    </div>" +
-      "  </div>" +
+      '  <div id="stlContent" role="dialog" aria-label="3D model viewer"></div>' +
       "</div>";
+    this.getContentWrapper().appendChild(
+      document.createRange().createContextualFragment(backdrop),
+    );
 
-    const backdropNode: Node = document
-      .createRange()
-      .createContextualFragment(backdrop);
-    this.getContentWrapper().appendChild(backdropNode);
+    const ui = new ViewerUi(
+      this.getStlWrapper().querySelector<HTMLElement>("#stlContent")!,
+      this.settings,
+    );
+    this.ui = ui;
 
-    const plateSelect = this.query<HTMLSelectElement>(".kadmos-plate-select");
-    for (const [id, plate] of Object.entries(BUILD_PLATES)) {
-      plateSelect?.add(new Option(plate.name, id));
+    const app = document.getElementById("kadmos-app");
+    if (app) {
+      applyHostSettings(app, this.settings);
     }
 
-    this.initToolbar();
-    this.enableTransitions([
+    // The stylesheet makes the spinner position: fixed.
+    enableTransitionsWhenStyled(this.getSpinner(), "fixed", [
       this.getSpinner(),
       this.getErrorWrapper(),
       this.getStlWrapper(),
     ]);
 
     window.addEventListener("resize", () => {
-      this.viewer?.setSize(...this.fitSize());
+      ui.setSize(...this.fitSize());
     });
-  }
 
-  /**
-   * Turns on the fade transitions once Kadmos' stylesheet has applied.
-   * Bundlers often inject it after first paint; with transitions already
-   * active, the overlays would visibly fade from unstyled to hidden on
-   * page load (a flash of the red error box).
-   */
-  private static enableTransitions(elements: HTMLElement[], frames = 0): void {
-    // The stylesheet makes the spinner fixed; until then it's static.
-    const styled = getComputedStyle(elements[0]).position === "fixed";
-    if (!styled && frames < 600) {
-      requestAnimationFrame(() => this.enableTransitions(elements, frames + 1));
-      return;
-    }
-
-    // One more frame, so the hidden state is in place before transitions
-    // apply to changes.
-    requestAnimationFrame(() => {
-      for (const element of elements) {
-        element.classList.add("kadmos-animated");
-      }
-    });
+    return ui;
   }
 
   private static bindPopupListeners(): void {
@@ -407,264 +304,6 @@ export class Kadmos {
     });
   }
 
-  private static initToolbar(): void {
-    this.query("#stlToolbar")?.addEventListener("click", (event) => {
-      const button = (event.target as HTMLElement).closest<HTMLElement>(
-        "[data-action]",
-      );
-      if (button && this.viewer) {
-        this.handleToolbarAction(this.viewer, button);
-      }
-    });
-
-    this.query(".kadmos-segmented")?.addEventListener("click", (event) => {
-      const button = (event.target as HTMLElement).closest<HTMLElement>(
-        "[data-axis]",
-      );
-      if (!button) {
-        return;
-      }
-
-      this.query(".kadmos-segmented")
-        ?.querySelectorAll("[data-axis]")
-        .forEach((axisButton) =>
-          axisButton.setAttribute(
-            "aria-pressed",
-            String(axisButton === button),
-          ),
-        );
-      this.applySection();
-    });
-
-    this.query(".kadmos-section-range")?.addEventListener("input", () =>
-      this.applySection(),
-    );
-
-    this.query('[data-measure="clear"]')?.addEventListener("click", () =>
-      this.viewer?.clearMeasurements(),
-    );
-
-    this.query(".kadmos-plate-select")?.addEventListener("change", () =>
-      this.applyPlate(),
-    );
-  }
-
-  private static handleToolbarAction(
-    viewer: Viewer,
-    button: HTMLElement,
-  ): void {
-    const action = button.dataset.action ?? "";
-    const toggled = !this.isPressed(action);
-
-    switch (action) {
-      case "reset":
-        viewer.setView("home");
-        break;
-      case "rotate":
-        viewer.autoRotate = toggled;
-        this.setPressed(action, toggled);
-        break;
-      case "wireframe":
-        viewer.setWireframe(toggled);
-        this.setPressed(action, toggled);
-        break;
-      case "texture":
-        viewer.setTexture(toggled);
-        this.setPressed(action, toggled);
-        break;
-      case "view":
-        // A fixed view is for inspecting; spinning away from it isn't.
-        viewer.autoRotate = false;
-        this.setPressed("rotate", false);
-        viewer.setView(button.dataset.view as ViewPreset);
-        break;
-      case "ortho":
-        viewer.setOrthographic(toggled);
-        this.setPressed(action, toggled);
-        break;
-      case "dimensions":
-        viewer.setDimensionsVisible(toggled);
-        this.setPressed(action, toggled);
-        break;
-      case "section":
-        this.setPressed(action, toggled);
-        this.showPanel(action, toggled);
-        this.applySection();
-        break;
-      case "measure":
-        viewer.setMeasuring(toggled);
-        this.setPressed(action, toggled);
-        this.showPanel(action, toggled);
-        break;
-      case "plate":
-        this.setPressed(action, toggled);
-        this.showPanel(action, toggled);
-        this.applyPlate();
-        break;
-    }
-  }
-
-  private static applySection(): void {
-    if (!this.viewer) {
-      return;
-    }
-
-    if (!this.isPressed("section")) {
-      this.viewer.setSection(undefined);
-      return;
-    }
-
-    const axis = (this.query('.kadmos-segmented [aria-pressed="true"]')?.dataset
-      .axis ?? "z") as SectionAxis;
-    const range = this.query<HTMLInputElement>(".kadmos-section-range");
-    this.viewer.setSection(axis, Number(range?.value ?? 500) / 1000);
-  }
-
-  private static applyPlate(): void {
-    if (!this.viewer) {
-      return;
-    }
-
-    const select = this.query<HTMLSelectElement>(".kadmos-plate-select");
-    const plate = !this.isPressed("plate")
-      ? undefined
-      : select?.value === CUSTOM_PLATE
-        ? this.customPlate
-        : BUILD_PLATES[select?.value ?? ""];
-
-    this.showFit(this.viewer.setBuildPlate(plate), plate);
-  }
-
-  /** Puts every tool back to its default for a freshly loaded model. */
-  private static resetTools(
-    viewer: Viewer,
-    stats: ModelStats,
-    options: ModelOptions,
-  ): void {
-    for (const action of ["wireframe", "ortho", "section", "measure"]) {
-      this.setPressed(action, false);
-    }
-    this.setPressed("rotate", viewer.autoRotate);
-
-    const texture = parseFlag(options.texture) ?? true;
-    viewer.setTexture(texture);
-    this.setPressed("texture", texture);
-
-    const dimensions = parseFlag(options.dimensions) ?? true;
-    viewer.setDimensionsVisible(dimensions);
-    this.setPressed("dimensions", dimensions);
-    this.showPanel("section", false);
-    this.showPanel("measure", false);
-
-    const range = this.query<HTMLInputElement>(".kadmos-section-range");
-    if (range) {
-      range.value = "500";
-    }
-
-    this.showStats(stats);
-
-    const plate = parseBuildVolume(options.plate);
-    if (plate) {
-      this.selectPlate(plate);
-    }
-    this.setPressed("plate", plate !== undefined);
-    this.showPanel("plate", plate !== undefined);
-    this.applyPlate();
-  }
-
-  private static selectPlate(plate: BuildVolume): void {
-    const select = this.query<HTMLSelectElement>(".kadmos-plate-select");
-    if (!select) {
-      return;
-    }
-
-    const presetId = Object.keys(BUILD_PLATES).find(
-      (id) => BUILD_PLATES[id] === plate,
-    );
-    if (presetId) {
-      select.value = presetId;
-      return;
-    }
-
-    this.customPlate = plate;
-    let option = Array.from(select.options).find(
-      (candidate) => candidate.value === CUSTOM_PLATE,
-    );
-    if (!option) {
-      option = new Option("", CUSTOM_PLATE);
-      select.add(option);
-    }
-    option.text = plate.name;
-    select.value = CUSTOM_PLATE;
-  }
-
-  private static showStats(stats: ModelStats): void {
-    const { size, volume, triangles } = stats;
-    const sizeElement = this.query(".kadmos-info-size");
-    const metaElement = this.query(".kadmos-info-meta");
-
-    if (sizeElement) {
-      sizeElement.textContent = `${formatLength(size.x)} × ${formatLength(size.y)} × ${formatLength(size.z)} mm`;
-    }
-    if (metaElement) {
-      metaElement.textContent = `${formatVolume(volume)} · ${triangles.toLocaleString()} triangles`;
-    }
-  }
-
-  private static showFit(
-    fit: FitResult | undefined,
-    plate: BuildVolume | undefined,
-  ): void {
-    const element = this.query(".kadmos-info-fit");
-    if (!element) {
-      return;
-    }
-
-    element.hidden = !fit || !plate;
-    if (!fit || !plate) {
-      return;
-    }
-
-    element.classList.toggle("kadmos-info-fit--ok", fit.fits);
-    element.classList.toggle("kadmos-info-fit--bad", !fit.fits);
-
-    if (fit.fits) {
-      element.textContent = fit.rotated
-        ? `Fits ${plate.name} when rotated 90°`
-        : `Fits ${plate.name}`;
-      return;
-    }
-
-    const overflow = (["x", "y", "z"] as const)
-      .filter((axis) => fit.overflow[axis] > 0)
-      .map(
-        (axis) =>
-          `${axis.toUpperCase()} +${formatLength(fit.overflow[axis])} mm`,
-      )
-      .join(", ");
-    element.textContent = `Too large for ${plate.name}: ${overflow}`;
-  }
-
-  private static isPressed(action: string): boolean {
-    return (
-      this.query(`[data-action="${action}"]`)?.getAttribute("aria-pressed") ===
-      "true"
-    );
-  }
-
-  private static setPressed(action: string, pressed: boolean): void {
-    const button = this.query(`[data-action="${action}"]`);
-    button?.setAttribute("aria-pressed", String(pressed));
-    button?.classList.toggle("kadmos-toolbar-button--active", pressed);
-  }
-
-  private static showPanel(name: string, visible: boolean): void {
-    const panel = this.query(`[data-panel="${name}"]`);
-    if (panel) {
-      panel.hidden = !visible;
-    }
-  }
-
   private static showError(message: string): void {
     this.getSpinner().classList.remove("kadmos-spinner--visible");
     this.getErrorWrapper().classList.add("kadmos-error-wrapper--visible");
@@ -685,13 +324,13 @@ export class Kadmos {
 
   private static revealViewer(token: number): void {
     setTimeout(() => {
-      if (token !== this.loadToken) {
+      if (token !== this.openToken) {
         return;
       }
 
       this.getSpinner().classList.remove("kadmos-spinner--visible");
       setTimeout(() => {
-        if (token === this.loadToken) {
+        if (token === this.openToken) {
           this.getStlWrapper().classList.add("stlBackdrop--visible");
         }
       }, FADE_MS);
@@ -706,8 +345,8 @@ export class Kadmos {
 
   private static close(): void {
     // Invalidates any in-flight load and pending reveal.
-    this.loadController?.abort();
-    this.loadToken++;
+    this.ui?.abort();
+    this.openToken++;
 
     this.getSpinner().classList.remove("kadmos-spinner--visible");
     this.getErrorWrapper().classList.remove("kadmos-error-wrapper--visible");
@@ -715,8 +354,8 @@ export class Kadmos {
 
     window.clearTimeout(this.closeTimer);
     this.closeTimer = window.setTimeout(() => {
-      this.viewer?.stop();
-      this.viewer?.clearModel();
+      this.ui?.stop();
+      this.ui?.clear();
     }, FADE_MS);
   }
 }

@@ -1,36 +1,6 @@
-#kadmos-spinner {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  top: 0;
-  z-index: 2;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-  background: var(--kadmos-bg);
-  visibility: hidden;
-  opacity: 0;
-  // Still "visible" while fading out; don't swallow clicks meanwhile.
-  pointer-events: none;
-
-  // Only fade once Kadmos has enabled it (see enableTransitions): if this
-  // stylesheet arrives after first paint, hiding must be instant, not a
-  // fade-out of a still-visible element.
-  &.kadmos-animated {
-    transition:
-      opacity 0.25s linear,
-      visibility 0.25s linear;
-  }
-
-  &.kadmos-spinner--visible {
-    visibility: visible;
-    opacity: 1;
-    pointer-events: auto;
-  }
-
+// The bouncing dots and progress label, shared by the page-level spinner
+// and mounted viewers' own spinners.
+@mixin spinner-content {
   .spinner {
     width: 40px;
     height: 40px;
@@ -64,4 +34,40 @@
     letter-spacing: 0.02em;
     color: var(--kadmos-muted);
   }
+}
+
+#kadmos-spinner {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  background: var(--kadmos-bg);
+  visibility: hidden;
+  opacity: 0;
+  // Still "visible" while fading out; don't swallow clicks meanwhile.
+  pointer-events: none;
+
+  // Only fade once Kadmos has enabled it (see enableTransitions): if this
+  // stylesheet arrives after first paint, hiding must be instant, not a
+  // fade-out of a still-visible element.
+  &.kadmos-animated {
+    transition:
+      opacity 0.25s linear,
+      visibility 0.25s linear;
+  }
+
+  &.kadmos-spinner--visible {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  @include spinner-content;
 }

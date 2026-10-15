@@ -1,16 +1,35 @@
 @use "./animations" as *;
 @use "./@core" as *;
 
-// Not positioned itself: every child that needs to cover the viewport is
-// position: fixed on its own, and a full-viewport wrapper would swallow
-// clicks meant for the host page (e.g. popup-mode triggers).
-#kadmos-app {
+@mixin light-theme {
   --kadmos-bg: #f5f6f8;
   --kadmos-surface: #ffffff;
   --kadmos-fg: #1e2530;
   --kadmos-muted: #64748b;
   --kadmos-accent: #6366f1;
   --kadmos-error: #dc2626;
+}
+
+@mixin dark-theme {
+  --kadmos-bg: #14161a;
+  --kadmos-surface: #1c1f26;
+  --kadmos-fg: #e5e7eb;
+  --kadmos-muted: #9ca3af;
+  --kadmos-accent: #818cf8;
+  --kadmos-error: #f87171;
+}
+
+// The two kinds of host: #kadmos-app for popup and full-page mode, and
+// .kadmos-inline for viewers mounted into the page. data-kadmos-theme
+// ("auto", "light" or "dark") is set by Kadmos; an accent color set via
+// configure() or mount() is applied as an inline --kadmos-accent.
+//
+// #kadmos-app isn't positioned itself: every child that needs to cover the
+// viewport is position: fixed on its own, and a full-viewport wrapper
+// would swallow clicks meant for the host page (e.g. popup triggers).
+#kadmos-app,
+.kadmos-inline {
+  @include light-theme;
   --kadmos-radius: 10px;
   --kadmos-font:
     -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
@@ -18,13 +37,16 @@
 
   font-family: var(--kadmos-font);
   color: var(--kadmos-fg);
+}
 
-  @media (prefers-color-scheme: dark) {
-    --kadmos-bg: #14161a;
-    --kadmos-surface: #1c1f26;
-    --kadmos-fg: #e5e7eb;
-    --kadmos-muted: #9ca3af;
-    --kadmos-accent: #818cf8;
-    --kadmos-error: #f87171;
+@media (prefers-color-scheme: dark) {
+  #kadmos-app:not([data-kadmos-theme="light"]),
+  .kadmos-inline:not([data-kadmos-theme="light"]) {
+    @include dark-theme;
   }
+}
+
+#kadmos-app[data-kadmos-theme="dark"],
+.kadmos-inline[data-kadmos-theme="dark"] {
+  @include dark-theme;
 }

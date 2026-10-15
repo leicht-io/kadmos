@@ -2,7 +2,9 @@ import {
   BoxGeometry,
   Box3,
   BufferGeometry,
-  CanvasTexture,
+  Color,
+  DataTexture,
+  DataUtils,
   DirectionalLight,
   DoubleSide,
   EdgesGeometry,
@@ -11,6 +13,8 @@ import {
   GridHelper,
   Group,
   HalfFloatType,
+  LinearFilter,
+  LinearSRGBColorSpace,
   Line,
   LineBasicMaterial,
   LineSegments,
@@ -28,10 +32,10 @@ import {
   PlaneGeometry,
   PMREMGenerator,
   Raycaster,
+  RGBAFormat,
   Scene,
   ShadowMaterial,
   SphereGeometry,
-  SRGBColorSpace,
   Sphere,
   Texture,
   Vector2,
@@ -51,11 +55,14 @@ import {
 } from "three/addons/renderers/CSS2DRenderer.js";
 import { BuildVolume, checkFit, FitResult } from "./buildPlates.js";
 import { DEFAULT_COLOR } from "./color.js";
+import { inverseNeutralToneMap } from "./toneMapping.js";
 import { loadModel, LoadOptions } from "./loadModel.js";
 import { formatLength } from "./format.js";
 import { computeModelStats, ModelStats } from "./modelStats.js";
 
 export type ViewPreset = "home" | "top" | "front" | "side" | "iso";
+/** `auto` follows the visitor's system light/dark setting. */
+export type ThemeSetting = "auto" | "light" | "dark";
 export type SectionAxis = "x" | "y" | "z";
 
 export interface ViewerLoadOptions extends LoadOptions {
@@ -78,9 +85,10 @@ const VIEW_DIRECTIONS: Record<ViewPreset, Vector3> = {
 
 const KEY_LIGHT_DIRECTION = new Vector3(-0.6, -0.9, 1.5).normalize();
 const FOV = 35;
-const ACCENT = 0x6366f1;
+export const DEFAULT_ACCENT = 0x6366f1;
 
-interface Theme {
+/** Scene colors for one theme. */
+interface Palette {
   backgroundTop: string;
   backgroundBottom: string;
   gridMajor: number;
@@ -89,7 +97,7 @@ interface Theme {
   shadowOpacity: number;
 }
 
-const LIGHT_THEME: Theme = {
+const LIGHT_PALETTE: Palette = {
   backgroundTop: "#ffffff",
   backgroundBottom: "#e4e7ec",
   gridMajor: 0xb4b9c2,
@@ -98,7 +106,7 @@ const LIGHT_THEME: Theme = {
   shadowOpacity: 0.28,
 };
 
-const DARK_THEME: Theme = {
+const DARK_PALETTE: Palette = {
   backgroundTop: "#2b2f38",
   backgroundBottom: "#16181d",
   gridMajor: 0x4b515d,
@@ -138,6 +146,15 @@ export class Viewer {
     kadmosGrainDepth: { value: 0.02 },
   };
   private readonly darkMode = window.matchMedia("(prefers-color-scheme: dark)");
+  private readonly onColorSchemeChange = () => {
+    if (this.themeSetting === "auto") {
+      this.applyTheme();
+    }
+  };
+  private themeSetting: ThemeSetting;
+  private accent: number;
+  /** 3MF image textures load asynchronously; redraw once they arrive. */
+  private pendingTextures: Texture[] = [];
 
   private model: Group | undefined;
   private stats: ModelStats | undefined;
@@ -151,6 +168,10 @@ export class Viewer {
   private height = 1;
   private lastFrameTime: number | undefined;
   private needsRender = true;
+  /** What the camera is fitted to: the model, or model plus build plate. */
+  private readonly frameBox = new Box3();
+  /** Set once the visitor zooms or pans; resizes then leave the view be. */
+  private userAdjusted = false;
 
   private wireframe = false;
   private readonly sectionPlane = new Plane();
@@ -160,7 +181,13 @@ export class Viewer {
   private pendingMeasurePoint: Vector3 | undefined;
   private pointerDownAt: Vector2 | undefined;
 
-  constructor(container: HTMLElement) {
+  constructor(
+    container: HTMLElement,
+    options: { theme?: ThemeSetting; accent?: number } = {},
+  ) {
+    this.themeSetting = options.theme ?? "auto";
+    this.accent = options.accent ?? DEFAULT_ACCENT;
+
     this.renderer = new WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     // Neutral keeps the user's chosen color close to what they picked;
@@ -215,9 +242,12 @@ export class Viewer {
     this.controls.enableDamping = true;
     this.controls.autoRotate = true;
     this.controls.addEventListener("change", () => this.changed());
+    this.controls.addEventListener("start", () => {
+      this.userAdjusted = true;
+    });
 
     this.applyTheme();
-    this.darkMode.addEventListener("change", () => this.applyTheme());
+    this.darkMode.addEventListener("change", this.onColorSchemeChange);
 
     this.renderer.domElement.addEventListener("pointerdown", (event) => {
       this.pointerDownAt = new Vector2(event.clientX, event.clientY);
@@ -234,7 +264,34 @@ export class Viewer {
     this.labelRenderer.setSize(width, height);
     this.composer.setSize(width, height);
     this.updateProjection();
+    this.refit();
     this.changed();
+  }
+
+  /**
+   * Re-fits the camera distance to the current aspect ratio, keeping the
+   * viewing direction, so a narrower viewer doesn't crop the model. Left
+   * alone once the visitor has zoomed or panned.
+   */
+  private refit(): void {
+    if (!this.model || this.userAdjusted) {
+      return;
+    }
+
+    const direction = this.camera.position
+      .clone()
+      .sub(this.controls.target)
+      .normalize();
+    this.frame(this.frameBox);
+    const position = this.controls.target
+      .clone()
+      .addScaledVector(direction, this.frameDistance);
+    for (const camera of [this.perspectiveCamera, this.orthographicCamera]) {
+      camera.position.copy(position);
+    }
+    this.orthographicCamera.zoom = 1;
+    this.orthographicHeight = this.visibleHeightAt(this.frameDistance);
+    this.updateProjection();
   }
 
   public start(): void {
@@ -245,6 +302,16 @@ export class Viewer {
           ? 0
           : (time - this.lastFrameTime) / 1000;
       this.lastFrameTime = time;
+
+      if (this.pendingTextures.length > 0) {
+        const loaded = this.pendingTextures.filter((texture) => texture.image);
+        if (loaded.length > 0) {
+          this.pendingTextures = this.pendingTextures.filter(
+            (texture) => !texture.image,
+          );
+          this.changed();
+        }
+      }
 
       // Only draw when something moved or changed: an idle viewer
       // shouldn't keep the GPU (and a laptop's fan) busy.
@@ -261,6 +328,45 @@ export class Viewer {
 
   public stop(): void {
     this.renderer.setAnimationLoop(null);
+  }
+
+  /** Releases the WebGL context and removes the viewer's elements. */
+  public dispose(): void {
+    this.stop();
+    this.clearModel();
+    this.disposeChildren(this.ground);
+    this.darkMode.removeEventListener("change", this.onColorSchemeChange);
+    this.controls.dispose();
+    this.aoPass.dispose();
+    this.composer.dispose();
+    this.scene.environment?.dispose();
+    if (this.scene.background instanceof Texture) {
+      this.scene.background.dispose();
+    }
+    this.renderer.dispose();
+    // Browsers cap live WebGL contexts; free this one now rather than at
+    // garbage collection.
+    this.renderer.forceContextLoss();
+    this.renderer.domElement.remove();
+    this.labelRenderer.domElement.remove();
+  }
+
+  public setTheme(theme: ThemeSetting): void {
+    this.themeSetting = theme;
+    this.applyTheme();
+  }
+
+  /** Sets the color of overlays drawn in the scene (dimensions, measuring). */
+  public setAccent(color: number): void {
+    this.accent = color;
+    for (const group of [this.dimensionsGroup, this.measureGroup]) {
+      group.traverse((child) => {
+        if (child instanceof Mesh || child instanceof Line) {
+          (child.material as LineBasicMaterial).color.setHex(color);
+        }
+      });
+    }
+    this.changed();
   }
 
   /**
@@ -335,11 +441,13 @@ export class Viewer {
     this.disposeChildren(this.measureGroup);
     this.disposeChildren(this.plateGroup);
     this.pendingMeasurePoint = undefined;
+    this.pendingTextures = [];
     this.changed(true);
   }
 
   public setView(preset: ViewPreset): void {
     this.stopMomentum();
+    this.userAdjusted = false;
     const distance = this.frameDistance;
     const position = this.modelCenter
       .clone()
@@ -471,7 +579,7 @@ export class Viewer {
     const edges = new LineSegments(
       new EdgesGeometry(new BoxGeometry(size.x, size.y, size.z)),
       new LineBasicMaterial({
-        color: ACCENT,
+        color: this.accent,
         transparent: true,
         opacity: 0.7,
       }),
@@ -515,7 +623,7 @@ export class Viewer {
     }
 
     const fit = checkFit(this.stats.size, plate);
-    const theme = this.theme;
+    const theme = this.palette;
 
     const bed = new Mesh(
       new PlaneGeometry(plate.width, plate.depth),
@@ -620,7 +728,7 @@ export class Viewer {
     this.pendingMeasurePoint = undefined;
     const line = new Line(
       new BufferGeometry().setFromPoints([start, point]),
-      new LineBasicMaterial({ color: ACCENT, depthTest: false }),
+      new LineBasicMaterial({ color: this.accent, depthTest: false }),
     );
     line.renderOrder = 10;
     this.measureGroup.add(
@@ -636,7 +744,7 @@ export class Viewer {
   private createMarker(position: Vector3): Mesh {
     const marker = new Mesh(
       new SphereGeometry(this.modelRadius * 0.012, 16, 8),
-      new MeshBasicMaterial({ color: ACCENT, depthTest: false }),
+      new MeshBasicMaterial({ color: this.accent, depthTest: false }),
     );
     marker.position.copy(position);
     marker.renderOrder = 10;
@@ -662,12 +770,16 @@ export class Viewer {
     }
   }
 
-  private get theme(): Theme {
-    return this.darkMode.matches ? DARK_THEME : LIGHT_THEME;
+  private get palette(): Palette {
+    const dark =
+      this.themeSetting === "dark" ||
+      (this.themeSetting === "auto" && this.darkMode.matches);
+
+    return dark ? DARK_PALETTE : LIGHT_PALETTE;
   }
 
   private applyTheme(): void {
-    const theme = this.theme;
+    const theme = this.palette;
 
     if (this.scene.background instanceof Texture) {
       this.scene.background.dispose();
@@ -678,7 +790,11 @@ export class Viewer {
     );
     // Fade the grid into the bottom of the backdrop rather than into a
     // mismatched gray.
-    this.scene.fog = new Fog(theme.backgroundBottom, 1, 2);
+    this.scene.fog = new Fog(
+      displayedAs(new Color(theme.backgroundBottom)),
+      1,
+      2,
+    );
     this.updateFog();
     this.changed(true);
 
@@ -718,6 +834,9 @@ export class Viewer {
           metalness: 0,
           ior: 1.46,
         });
+        if (material.map && !material.map.image) {
+          this.pendingTextures.push(material.map);
+        }
         material.onBeforeCompile = (shader) => {
           Object.assign(shader.uniforms, this.surfaceUniforms);
           applyPlasticShader(shader);
@@ -780,7 +899,7 @@ export class Viewer {
       return;
     }
 
-    const theme = this.theme;
+    const theme = this.palette;
     const plateExtent = this.plate
       ? Math.max(this.plate.width, this.plate.depth) * 1.6
       : 0;
@@ -817,13 +936,15 @@ export class Viewer {
 
   /** Fits `box` in view along the current view direction. */
   private frame(box: Box3): void {
+    this.frameBox.copy(box);
     const sphere = box.getBoundingSphere(new Sphere());
     const halfFov = (FOV * Math.PI) / 360;
     const aspect = this.width / this.height;
     const halfFovHorizontal = Math.atan(Math.tan(halfFov) * aspect);
 
     this.frameDistance =
-      (sphere.radius / Math.sin(Math.min(halfFov, halfFovHorizontal))) * 1.05;
+      // Some margin, as the toolbar and info overlays cover the edges.
+      (sphere.radius / Math.sin(Math.min(halfFov, halfFovHorizontal))) * 1.12;
 
     for (const camera of [this.perspectiveCamera, this.orthographicCamera]) {
       camera.near = this.frameDistance / 100;
@@ -904,24 +1025,51 @@ function createLabel(
   return label;
 }
 
+/**
+ * A vertical gradient for the backdrop, stored in linear half floats and
+ * pre-compensated for the tone mapping (see displayedAs), so it shows the
+ * palette's colors exactly.
+ */
 function createGradientTexture(top: string, bottom: string): Texture {
-  const canvas = document.createElement("canvas");
-  canvas.width = 2;
-  canvas.height = 256;
+  const height = 128;
+  const topColor = new Color(top);
+  const bottomColor = new Color(bottom);
+  const data = new Uint16Array(height * 4);
 
-  const context = canvas.getContext("2d");
-  if (context) {
-    const gradient = context.createLinearGradient(0, 0, 0, canvas.height);
-    gradient.addColorStop(0, top);
-    gradient.addColorStop(1, bottom);
-    context.fillStyle = gradient;
-    context.fillRect(0, 0, canvas.width, canvas.height);
+  // DataTexture rows run bottom to top.
+  for (let row = 0; row < height; row++) {
+    const color = displayedAs(
+      bottomColor.clone().lerp(topColor, row / (height - 1)),
+    );
+    data.set(
+      [
+        DataUtils.toHalfFloat(color.r),
+        DataUtils.toHalfFloat(color.g),
+        DataUtils.toHalfFloat(color.b),
+        DataUtils.toHalfFloat(1),
+      ],
+      row * 4,
+    );
   }
 
-  const texture = new CanvasTexture(canvas);
-  texture.colorSpace = SRGBColorSpace;
+  const texture = new DataTexture(data, 1, height, RGBAFormat, HalfFloatType);
+  texture.colorSpace = LinearSRGBColorSpace;
+  texture.magFilter = LinearFilter;
+  texture.minFilter = LinearFilter;
+  texture.needsUpdate = true;
 
   return texture;
+}
+
+/**
+ * The color to put in the scene so it comes out as `color` on screen.
+ * Neutral tone mapping saturates darks and compresses highlights, which
+ * turned the dark backdrop navy.
+ */
+function displayedAs(color: Color): Color {
+  const [r, g, b] = inverseNeutralToneMap([color.r, color.g, color.b]);
+
+  return new Color().setRGB(r, g, b, LinearSRGBColorSpace);
 }
 
 /** A plain rectangular grid of lines in the XY plane, `step` apart. */
