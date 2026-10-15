@@ -1,0 +1,38 @@
+<!doctype html>
+<html dir="ltr" lang="en-GB">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Kadmos demo: 3D viewers for STL and 3MF models embedded in a page."
+    />
+    <title>Kadmos inline demo</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="demo.css" />
+  </head>
+  <body>
+    <nav>
+      <a href="./">Full page</a>
+      <a href="popup.html">Popup</a>
+      <a href="inline.html">Inline</a>
+    </nav>
+
+    <h1>Inline mode</h1>
+    <p>Two viewers mounted into the page, each sized by its container.</p>
+
+    <div class="controls" role="group" aria-label="Viewer theme">
+      Theme:
+      <button type="button" data-theme="auto">Auto</button>
+      <button type="button" data-theme="light">Light</button>
+      <button type="button" data-theme="dark">Dark</button>
+    </div>
+
+    <div class="viewers">
+      <div class="viewer" id="knot"></div>
+      <div class="viewer" id="plate"></div>
+    </div>
+
+    <script type="module" src="inline.ts"></script>
+  </body>
+</html>

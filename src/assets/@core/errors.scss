@@ -8,17 +8,26 @@
   background: var(--kadmos-bg);
   visibility: hidden;
   opacity: 0;
-  transition:
-    opacity 0.25s linear,
-    visibility 0.25s linear;
+  // Still "visible" while fading out; don't swallow clicks meanwhile.
+  pointer-events: none;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
 
+  // Only fade once Kadmos has enabled it (see enableTransitions): if this
+  // stylesheet arrives after first paint, hiding must be instant, not a
+  // fade-out of a still-visible element.
+  &.kadmos-animated {
+    transition:
+      opacity 0.25s linear,
+      visibility 0.25s linear;
+  }
+
   &.kadmos-error-wrapper--visible {
     visibility: visible;
     opacity: 1;
+    pointer-events: auto;
   }
 
   #kadmos-error {
@@ -31,5 +40,15 @@
     border-radius: var(--kadmos-radius);
     font-family: var(--kadmos-font);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+
+    p {
+      margin: 0;
+    }
+
+    .kadmos-error-hint {
+      margin-top: 6px;
+      font-size: 13px;
+      opacity: 0.85;
+    }
   }
 }
