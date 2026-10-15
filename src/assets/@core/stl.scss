@@ -11,13 +11,22 @@
   background: rgba(0, 0, 0, 0.45);
   opacity: 0;
   visibility: hidden;
-  transition:
-    opacity 0.25s linear,
-    visibility 0.25s linear;
+  // Still "visible" while fading out; don't swallow clicks meanwhile.
+  pointer-events: none;
+
+  // Only fade once Kadmos has enabled it (see enableTransitions): if this
+  // stylesheet arrives after first paint, hiding must be instant, not a
+  // fade-out of a still-visible element.
+  &.kadmos-animated {
+    transition:
+      opacity 0.25s linear,
+      visibility 0.25s linear;
+  }
 
   &.stlBackdrop--visible {
     opacity: 1;
     visibility: visible;
+    pointer-events: auto;
   }
 
   #stlContent {
@@ -27,43 +36,220 @@
     box-shadow: 0 16px 48px rgba(0, 0, 0, 0.25);
     overflow: hidden;
     line-height: 0;
+    font-family: var(--kadmos-font);
   }
 
   #stlModel {
+    position: relative;
     line-height: 0;
 
     canvas {
       display: block;
+      touch-action: none;
     }
+  }
+
+  // CSS2DRenderer's overlay for 3D-anchored labels (dimensions, measurements).
+  .kadmos-labels {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+    line-height: normal;
+  }
+
+  .kadmos-label {
+    padding: 3px 7px;
+    border-radius: 6px;
+    background: rgba(20, 22, 26, 0.8);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+
+    &.kadmos-label--x {
+      box-shadow: inset 3px 0 0 #ef4444;
+    }
+
+    &.kadmos-label--y {
+      box-shadow: inset 3px 0 0 #22c55e;
+    }
+
+    &.kadmos-label--z {
+      box-shadow: inset 3px 0 0 #3b82f6;
+    }
+
+    &.kadmos-label--measure {
+      background: var(--kadmos-accent);
+    }
+  }
+
+  .kadmos-info {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-width: calc(100% - 24px);
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(20, 22, 26, 0.72);
+    color: #fff;
+    line-height: 1.35;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+
+    .kadmos-info-size {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .kadmos-info-meta {
+      color: rgba(255, 255, 255, 0.7);
+    }
+
+    .kadmos-info-fit {
+      margin-top: 4px;
+      font-weight: 600;
+
+      &.kadmos-info-fit--ok {
+        color: #4ade80;
+      }
+
+      &.kadmos-info-fit--bad {
+        color: #f87171;
+      }
+
+      &[hidden] {
+        display: none;
+      }
+    }
+  }
+
+  .kadmos-panels {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+    line-height: normal;
+  }
+
+  .kadmos-panel {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    background: rgba(20, 22, 26, 0.72);
+    color: #fff;
+    font-size: 12px;
+
+    &[hidden] {
+      display: none;
+    }
+  }
+
+  .kadmos-panel-title {
+    font-weight: 600;
+  }
+
+  .kadmos-panel-hint {
+    color: rgba(255, 255, 255, 0.7);
+  }
+
+  .kadmos-panel-button,
+  .kadmos-segmented button,
+  .kadmos-plate-select {
+    height: 24px;
+    padding: 0 8px;
+    border: none;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+    font: inherit;
+    cursor: pointer;
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.2);
+    }
+  }
+
+  .kadmos-plate-select option {
+    color: initial;
+  }
+
+  .kadmos-segmented {
+    display: flex;
+    gap: 2px;
+
+    button[aria-pressed="true"] {
+      background: var(--kadmos-accent);
+    }
+  }
+
+  .kadmos-section-range {
+    width: 120px;
+    accent-color: var(--kadmos-accent);
   }
 
   #stlToolbar {
     position: absolute;
     bottom: 12px;
     left: 12px;
+    right: 12px;
     z-index: 2;
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
+    pointer-events: none;
+  }
+
+  .kadmos-toolbar-group {
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 10px;
+    background: rgba(20, 22, 26, 0.72);
+    pointer-events: auto;
   }
 
   .kadmos-toolbar-button {
-    width: 32px;
+    min-width: 32px;
     height: 32px;
     display: flex;
     align-items: center;
     justify-content: center;
     border: none;
     border-radius: 8px;
-    background: rgba(20, 22, 26, 0.72);
+    background: transparent;
     color: #fff;
-    font-size: 15px;
+    font-family: var(--kadmos-font);
+    font-size: 12px;
+    font-weight: 600;
     cursor: pointer;
     transition:
       background-color 0.15s linear,
       color 0.15s linear;
 
     &:hover {
-      background: rgba(20, 22, 26, 0.88);
+      background: rgba(255, 255, 255, 0.14);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--kadmos-accent);
+      outline-offset: 1px;
+    }
+
+    &.kadmos-toolbar-button--text {
+      padding: 0 8px;
     }
 
     &.kadmos-toolbar-button--active {

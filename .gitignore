@@ -3,7 +3,6 @@ node_modules
 .cache
 dist
 /dist/
-/.parcel-cache/
 /examples/dist/
 /.yarn/
 /src/assets/styles.css

@@ -6,19 +6,27 @@ on:
   pull_request:
     branches: [master]
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      # Activates the Yarn version pinned in package.json's packageManager
+      # field; must run before setup-node so its yarn cache step finds it.
+      - run: corepack enable
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: yarn
 
-      - run: yarn install --frozen-lockfile
+      - run: yarn install --immutable
       - run: yarn lint
+      - run: yarn test
       - run: yarn format:check
       - run: yarn build
       - run: yarn build:app

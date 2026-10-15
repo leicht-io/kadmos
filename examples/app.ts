@@ -1,3 +1,4 @@
+import "../src/assets/styles.scss";
 import { Kadmos } from "../src";
 
 export class App {

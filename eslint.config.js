@@ -5,7 +5,7 @@ import globals from "globals";
 
 export default tseslint.config(
   {
-    ignores: ["dist/**", "examples/dist/**", ".parcel-cache/**"],
+    ignores: ["dist/**", "examples/dist/**"],
   },
   js.configs.recommended,
   tseslint.configs.recommended,

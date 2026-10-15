@@ -1,42 +1,43 @@
-import "./assets/styles.css";
+// Only types come from the three.js side here: the Viewer module (and
+// three.js with it) is loaded on first use, so pages that merely wire up
+// popup triggers don't download the 3D engine until a model is opened.
+import type { ModelStats } from "./modelStats.js";
+import type { SectionAxis, Viewer, ViewPreset } from "./Viewer.js";
 import {
-  ACESFilmicToneMapping,
-  AmbientLight,
-  Box3,
-  BufferGeometry,
-  Color,
-  DirectionalLight,
-  Fog,
-  GridHelper,
-  HemisphereLight,
-  Mesh,
-  MeshPhongMaterial,
-  PCFSoftShadowMap,
-  PerspectiveCamera,
-  PMREMGenerator,
-  PointLight,
-  Scene,
-  Vector3,
-  WebGLRenderer,
-} from "three";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { STLLoader } from "three/addons/loaders/STLLoader.js";
-import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+  BUILD_PLATES,
+  BuildVolume,
+  FitResult,
+  parseBuildVolume,
+} from "./buildPlates.js";
+import { parseColor } from "./color.js";
+import { formatLength, formatVolume } from "./format.js";
+import { parseFlag } from "./options.js";
+import { ICONS } from "./icons.js";
+
+export interface ModelOptions {
+  /** Build plate preset id (e.g. `prusa-mk4`) or `WxDxH` in millimeters. */
+  plate?: string;
+  /** Show the plastic surface texture (default true). */
+  texture?: boolean | string;
+  /** Show the dimensions overlay on load (default true). */
+  dimensions?: boolean | string;
+}
+
+const FADE_MS = 250;
+const POPUP_MARGIN = 32;
+const CUSTOM_PLATE = "custom";
 
 export class Kadmos {
-  // The largest dimension of any loaded model is normalized to this many
-  // world units, so a model auto-fits the scene regardless of the units
-  // it was originally authored in.
-  private static readonly TARGET_SIZE = 5;
-  private static readonly HOME_CAMERA_POSITION = new Vector3(0, -9, 6);
-  private static readonly HOME_CAMERA_TARGET = new Vector3(0, 0, 0);
-
-  private static camera: PerspectiveCamera;
-  private static scene: Scene;
-  private static renderer: WebGLRenderer;
-  private static controls: OrbitControls;
-  private static currentMaterial: MeshPhongMaterial | undefined;
-  private static selector: string;
+  private static viewer: Viewer | undefined;
+  private static viewerPromise: Promise<Viewer> | undefined;
+  private static fullPage = false;
+  private static requestedSize = { width: 800, height: 600 };
+  private static loadToken = 0;
+  private static loadController: AbortController | undefined;
+  private static closeTimer: number | undefined;
+  private static popupListenersBound = false;
+  private static readonly triggerClasses = new Set<string>();
+  private static customPlate: BuildVolume | undefined;
 
   private static getSpinner(): HTMLElement {
     const element = document.querySelector<HTMLElement>("#kadmos-spinner");
@@ -108,67 +109,229 @@ export class Kadmos {
     }
   }
 
+  private static query<T extends HTMLElement>(selector: string): T | null {
+    return this.getStlWrapper().querySelector<T>(selector);
+  }
+
   public static initFromUrl(): void {
-    this.addPopupTemplateHtmlToDom();
+    this.fullPage = true;
 
-    document.addEventListener("DOMContentLoaded", () => {
+    this.whenReady(() => {
+      this.addPopupTemplateHtmlToDom();
+
       const urlParams = new URLSearchParams(window.location.search);
-
-      const fileUrl: string | null = urlParams.get("fileUrl");
-      const color: string = this.normalizeColor(urlParams.get("color"));
+      const fileUrl = urlParams.get("fileUrl");
 
       if (!fileUrl) {
-        this.getErrorWrapper().classList.add("kadmos-error-wrapper--visible");
-        this.getError().innerHTML = "<p>The fileUrl parameter is missing</p>";
+        this.showError("The fileUrl parameter is missing");
 
         return;
       }
 
-      this.handleModel(fileUrl, color, window.innerWidth, window.innerHeight);
-      window.addEventListener("resize", () => {
-        if (this.renderer) {
-          this.renderer.setSize(window.innerWidth, window.innerHeight);
-        }
-      });
-      this.getStlWrapper().classList.add("backdrop--fade-in");
+      this.handleModel(
+        fileUrl,
+        urlParams.get("color"),
+        window.innerWidth,
+        window.innerHeight,
+        {
+          plate: urlParams.get("plate") ?? undefined,
+          texture: urlParams.get("texture") ?? undefined,
+          dimensions: urlParams.get("dimensions") ?? undefined,
+        },
+      );
     });
   }
 
-  public static initAll(selector: string): void {
-    this.selector = selector;
-    this.addPopupTemplateHtmlToDom();
-    this.handleEvents();
+  public static initAll(className: string): void {
+    this.whenReady(() => {
+      this.addPopupTemplateHtmlToDom();
+      this.bindPopupListeners();
+
+      if (this.triggerClasses.has(className)) {
+        return;
+      }
+      this.triggerClasses.add(className);
+
+      // Delegated, so triggers added to the page later work too.
+      document.addEventListener("click", (event) => {
+        if (!(event.target instanceof Element)) {
+          return;
+        }
+
+        // closest() rather than the target itself, since a click can
+        // come from a nested child that doesn't carry the attributes.
+        const trigger = event.target.closest<HTMLElement>(
+          `.${CSS.escape(className)}`,
+        );
+        const filePath = trigger?.dataset.file;
+        if (!trigger || !filePath) {
+          return;
+        }
+
+        // Triggers can be real links (crawlable, and a download without
+        // JavaScript); open the viewer instead of following them.
+        event.preventDefault();
+        this.handleModel(filePath, trigger.dataset.color, 800, 600, {
+          plate: trigger.dataset.plate,
+          texture: trigger.dataset.texture,
+          dimensions: trigger.dataset.dimensions,
+        });
+      });
+    });
   }
 
-  private static normalizeColor(rawColor: string | null): string {
-    const color = rawColor || "0x626262";
-
-    // MeshPhongMaterial's `specular: 0x0` renders true black as a
-    // featureless silhouette against the shadowed grid, so nudge any
-    // spelling of black to a dark gray that still reads as "black".
-    if (Number(color) === 0) {
-      return "0x444444";
+  /**
+   * Opens a model in the viewer. In popup mode `width` and `height` are
+   * the largest size the popup grows to; it shrinks to fit the window.
+   */
+  public static handleModel(
+    filePath: string,
+    color?: string | null,
+    width = 800,
+    height = 600,
+    options: ModelOptions = {},
+  ): void {
+    this.addPopupTemplateHtmlToDom();
+    if (!this.fullPage) {
+      this.bindPopupListeners();
     }
 
-    return color;
+    window.clearTimeout(this.closeTimer);
+    this.loadController?.abort();
+    const controller = new AbortController();
+    this.loadController = controller;
+    const token = ++this.loadToken;
+
+    this.requestedSize = { width, height };
+    this.resetUiState();
+
+    this.getViewer()
+      .then(async (viewer) => {
+        viewer.setSize(...this.fitSize());
+        const stats = await viewer.load(filePath, {
+          color: parseColor(color),
+          signal: controller.signal,
+          onProgress: (fraction) => {
+            if (token === this.loadToken) {
+              this.getSpinnerProgress().textContent = `${Math.round(fraction * 100)}%`;
+            }
+          },
+        });
+
+        if (token !== this.loadToken) {
+          return;
+        }
+
+        this.resetTools(viewer, stats, options);
+        viewer.start();
+        this.revealViewer(token);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted || token !== this.loadToken) {
+          return;
+        }
+
+        console.error(error);
+        this.showError("The model could not be loaded");
+      });
+  }
+
+  private static getViewer(): Promise<Viewer> {
+    this.viewerPromise ??= import("./Viewer.js").then(
+      ({ Viewer }) => {
+        this.viewer = new Viewer(this.getModelContainer());
+
+        return this.viewer;
+      },
+      (error: unknown) => {
+        // Let a later open retry, e.g. after a dropped connection.
+        this.viewerPromise = undefined;
+        throw error;
+      },
+    );
+
+    return this.viewerPromise;
+  }
+
+  private static whenReady(callback: () => void): void {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", callback, { once: true });
+    } else {
+      callback();
+    }
+  }
+
+  private static fitSize(): [number, number] {
+    if (this.fullPage) {
+      return [window.innerWidth, window.innerHeight];
+    }
+
+    const { width, height } = this.requestedSize;
+
+    return [
+      Math.max(240, Math.min(width, window.innerWidth - POPUP_MARGIN)),
+      Math.max(240, Math.min(height, window.innerHeight - POPUP_MARGIN)),
+    ];
   }
 
   private static addPopupTemplateHtmlToDom(): void {
-    // initFromUrl() and initAll() can both run in the same page (as the
-    // demo does); guard against injecting a second, duplicate-ID popup.
+    // initFromUrl(), initAll() and handleModel() can all run in the same
+    // page; guard against injecting a second, duplicate-ID popup.
     if (document.getElementById("stlBackdrop")) {
       return;
     }
 
+    const toggle = (action: string, label: string, content: string) =>
+      `<button type="button" class="kadmos-toolbar-button" data-action="${action}" title="${label}" aria-label="${label}" aria-pressed="false">${content}</button>`;
+    const view = (preset: ViewPreset, label: string) =>
+      `<button type="button" class="kadmos-toolbar-button kadmos-toolbar-button--text" data-action="view" data-view="${preset}" title="${label} view">${label}</button>`;
+
     const backdrop: string =
       '<div id="stlBackdrop">' +
-      '  <div id="stlContent">' +
-      '    <div id="stlToolbar">' +
-      '      <button type="button" class="kadmos-toolbar-button" data-action="reset" title="Reset view" aria-label="Reset view">⟲</button>' +
-      '      <button type="button" class="kadmos-toolbar-button" data-action="rotate" title="Toggle auto-rotate" aria-label="Toggle auto-rotate">↻</button>' +
-      '      <button type="button" class="kadmos-toolbar-button" data-action="wireframe" title="Toggle wireframe" aria-label="Toggle wireframe">▦</button>' +
+      '  <div id="stlContent" role="dialog" aria-label="3D model viewer">' +
+      '    <div id="stlModel"></div>' +
+      '    <div class="kadmos-info" aria-live="polite">' +
+      '      <div class="kadmos-info-size"></div>' +
+      '      <div class="kadmos-info-meta"></div>' +
+      '      <div class="kadmos-info-fit" hidden></div>' +
       "    </div>" +
-      '    <div id="stlModel">' +
+      '    <div class="kadmos-panels">' +
+      '      <div class="kadmos-panel" data-panel="section" hidden>' +
+      '        <span class="kadmos-panel-title">Section</span>' +
+      '        <div class="kadmos-segmented" role="group" aria-label="Section axis">' +
+      '          <button type="button" data-axis="x" aria-pressed="false">X</button>' +
+      '          <button type="button" data-axis="y" aria-pressed="false">Y</button>' +
+      '          <button type="button" data-axis="z" aria-pressed="true">Z</button>' +
+      "        </div>" +
+      '        <input type="range" class="kadmos-section-range" min="0" max="1000" value="500" aria-label="Section position">' +
+      "      </div>" +
+      '      <div class="kadmos-panel" data-panel="measure" hidden>' +
+      '        <span class="kadmos-panel-title">Measure</span>' +
+      '        <span class="kadmos-panel-hint">Click two points on the model</span>' +
+      '        <button type="button" class="kadmos-panel-button" data-measure="clear">Clear</button>' +
+      "      </div>" +
+      '      <div class="kadmos-panel" data-panel="plate" hidden>' +
+      '        <label class="kadmos-panel-title" for="kadmos-plate-select">Build plate</label>' +
+      '        <select id="kadmos-plate-select" class="kadmos-plate-select"></select>' +
+      "      </div>" +
+      "    </div>" +
+      '    <div id="stlToolbar" role="toolbar" aria-label="Viewer controls">' +
+      '      <div class="kadmos-toolbar-group">' +
+      `        <button type="button" class="kadmos-toolbar-button" data-action="reset" title="Reset view" aria-label="Reset view">${ICONS.reset}</button>` +
+      `        ${toggle("rotate", "Toggle auto-rotate", ICONS.rotate)}` +
+      `        ${toggle("wireframe", "Toggle wireframe", ICONS.wireframe)}` +
+      `        ${toggle("texture", "Toggle surface texture", ICONS.texture)}` +
+      "      </div>" +
+      '      <div class="kadmos-toolbar-group">' +
+      `        ${view("top", "Top")}${view("front", "Front")}${view("side", "Side")}${view("iso", "Iso")}` +
+      `        ${toggle("ortho", "Toggle orthographic camera", "Ortho").replace('class="kadmos-toolbar-button"', 'class="kadmos-toolbar-button kadmos-toolbar-button--text"')}` +
+      "      </div>" +
+      '      <div class="kadmos-toolbar-group">' +
+      `        ${toggle("dimensions", "Show dimensions", ICONS.dimensions)}` +
+      `        ${toggle("section", "Section view", ICONS.section)}` +
+      `        ${toggle("measure", "Measure distance", ICONS.measure)}` +
+      `        ${toggle("plate", "Show build plate", ICONS.plate)}` +
+      "      </div>" +
       "    </div>" +
       "  </div>" +
       "</div>";
@@ -178,241 +341,360 @@ export class Kadmos {
       .createContextualFragment(backdrop);
     this.getContentWrapper().appendChild(backdropNode);
 
+    const plateSelect = this.query<HTMLSelectElement>(".kadmos-plate-select");
+    for (const [id, plate] of Object.entries(BUILD_PLATES)) {
+      plateSelect?.add(new Option(plate.name, id));
+    }
+
     this.initToolbar();
+    this.enableTransitions([
+      this.getSpinner(),
+      this.getErrorWrapper(),
+      this.getStlWrapper(),
+    ]);
+
+    window.addEventListener("resize", () => {
+      this.viewer?.setSize(...this.fitSize());
+    });
   }
 
-  private static initToolbar(): void {
-    const toolbar = document.getElementById("stlToolbar");
-    if (!toolbar) {
+  /**
+   * Turns on the fade transitions once Kadmos' stylesheet has applied.
+   * Bundlers often inject it after first paint; with transitions already
+   * active, the overlays would visibly fade from unstyled to hidden on
+   * page load (a flash of the red error box).
+   */
+  private static enableTransitions(elements: HTMLElement[], frames = 0): void {
+    // The stylesheet makes the spinner fixed; until then it's static.
+    const styled = getComputedStyle(elements[0]).position === "fixed";
+    if (!styled && frames < 600) {
+      requestAnimationFrame(() => this.enableTransitions(elements, frames + 1));
       return;
     }
 
-    toolbar.addEventListener("click", (event) => {
+    // One more frame, so the hidden state is in place before transitions
+    // apply to changes.
+    requestAnimationFrame(() => {
+      for (const element of elements) {
+        element.classList.add("kadmos-animated");
+      }
+    });
+  }
+
+  private static bindPopupListeners(): void {
+    if (this.popupListenersBound) {
+      return;
+    }
+    this.popupListenersBound = true;
+
+    document.addEventListener("keyup", (event) => {
+      if (event.key === "Escape") {
+        this.close();
+      }
+    });
+
+    this.getStlWrapper().addEventListener("click", (event) => {
+      if (event.target === event.currentTarget) {
+        this.close();
+      }
+    });
+
+    // In popup mode the error covers the page, so it must be dismissable.
+    this.getErrorWrapper().addEventListener("click", () => {
+      if (!this.fullPage) {
+        this.close();
+      }
+    });
+  }
+
+  private static initToolbar(): void {
+    this.query("#stlToolbar")?.addEventListener("click", (event) => {
       const button = (event.target as HTMLElement).closest<HTMLElement>(
         "[data-action]",
+      );
+      if (button && this.viewer) {
+        this.handleToolbarAction(this.viewer, button);
+      }
+    });
+
+    this.query(".kadmos-segmented")?.addEventListener("click", (event) => {
+      const button = (event.target as HTMLElement).closest<HTMLElement>(
+        "[data-axis]",
       );
       if (!button) {
         return;
       }
 
-      switch (button.dataset.action) {
-        case "reset":
-          this.resetView();
-          break;
-        case "rotate":
-          this.toggleAutoRotate(button);
-          break;
-        case "wireframe":
-          this.toggleWireframe(button);
-          break;
-      }
+      this.query(".kadmos-segmented")
+        ?.querySelectorAll("[data-axis]")
+        .forEach((axisButton) =>
+          axisButton.setAttribute(
+            "aria-pressed",
+            String(axisButton === button),
+          ),
+        );
+      this.applySection();
     });
-  }
 
-  private static resetView(): void {
-    if (!this.camera || !this.controls) {
-      return;
-    }
+    this.query(".kadmos-section-range")?.addEventListener("input", () =>
+      this.applySection(),
+    );
 
-    this.camera.position.copy(this.HOME_CAMERA_POSITION);
-    this.controls.target.copy(this.HOME_CAMERA_TARGET);
-    this.controls.update();
-  }
+    this.query('[data-measure="clear"]')?.addEventListener("click", () =>
+      this.viewer?.clearMeasurements(),
+    );
 
-  private static toggleAutoRotate(button: HTMLElement): void {
-    if (!this.controls) {
-      return;
-    }
-
-    this.controls.autoRotate = !this.controls.autoRotate;
-    button.classList.toggle(
-      "kadmos-toolbar-button--active",
-      this.controls.autoRotate,
+    this.query(".kadmos-plate-select")?.addEventListener("change", () =>
+      this.applyPlate(),
     );
   }
 
-  private static toggleWireframe(button: HTMLElement): void {
-    if (!this.currentMaterial) {
-      return;
-    }
-
-    this.currentMaterial.wireframe = !this.currentMaterial.wireframe;
-    button.classList.toggle(
-      "kadmos-toolbar-button--active",
-      this.currentMaterial.wireframe,
-    );
-  }
-
-  private static handleCenter(geometry: BufferGeometry): Box3 {
-    geometry.computeBoundingBox();
-    geometry.center();
-
-    const boundingBox: Box3 | null = geometry.boundingBox;
-    if (!boundingBox) {
-      throw new Error("Kadmos: unable to compute model bounding box");
-    }
-
-    const height = boundingBox.max.z - boundingBox.min.z;
-    geometry.translate(0, 0, height / 2);
-
-    return boundingBox;
-  }
-
-  public static handleModel(
-    filePath: string,
-    color: string,
-    width: number,
-    height: number,
+  private static handleToolbarAction(
+    viewer: Viewer,
+    button: HTMLElement,
   ): void {
-    this.resetUiState();
+    const action = button.dataset.action ?? "";
+    const toggled = !this.isPressed(action);
 
-    if (this.renderer) {
-      this.renderer.setAnimationLoop(null);
-      this.renderer.dispose();
+    switch (action) {
+      case "reset":
+        viewer.setView("home");
+        break;
+      case "rotate":
+        viewer.autoRotate = toggled;
+        this.setPressed(action, toggled);
+        break;
+      case "wireframe":
+        viewer.setWireframe(toggled);
+        this.setPressed(action, toggled);
+        break;
+      case "texture":
+        viewer.setTexture(toggled);
+        this.setPressed(action, toggled);
+        break;
+      case "view":
+        // A fixed view is for inspecting; spinning away from it isn't.
+        viewer.autoRotate = false;
+        this.setPressed("rotate", false);
+        viewer.setView(button.dataset.view as ViewPreset);
+        break;
+      case "ortho":
+        viewer.setOrthographic(toggled);
+        this.setPressed(action, toggled);
+        break;
+      case "dimensions":
+        viewer.setDimensionsVisible(toggled);
+        this.setPressed(action, toggled);
+        break;
+      case "section":
+        this.setPressed(action, toggled);
+        this.showPanel(action, toggled);
+        this.applySection();
+        break;
+      case "measure":
+        viewer.setMeasuring(toggled);
+        this.setPressed(action, toggled);
+        this.showPanel(action, toggled);
+        break;
+      case "plate":
+        this.setPressed(action, toggled);
+        this.showPanel(action, toggled);
+        this.applyPlate();
+        break;
     }
-    this.getModelContainer().innerHTML = "";
-
-    this.initScene();
-    this.initCamera(width, height);
-    this.scene.add(this.camera);
-
-    const grid = new GridHelper(20, 50, 0x8d8d8d, 0xbdbdbd);
-    grid.rotateOnAxis(new Vector3(1, 0, 0), 90 * (Math.PI / 180));
-    this.scene.add(grid);
-
-    this.renderer = new WebGLRenderer({
-      antialias: true,
-    });
-    this.renderer.setClearColor(0xfafafa);
-    this.renderer.setPixelRatio(window.devicePixelRatio);
-    this.renderer.setSize(width, height);
-    this.renderer.toneMapping = ACESFilmicToneMapping;
-    this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = PCFSoftShadowMap;
-
-    this.applyEnvironmentLighting();
-
-    this.getModelContainer().appendChild(this.renderer.domElement);
-
-    const loader = new STLLoader();
-    const material = new MeshPhongMaterial({
-      color: Number(color),
-      specular: 0x0,
-      shininess: 10,
-    });
-    this.currentMaterial = material;
-
-    loader.load(
-      filePath,
-      (geometry) => {
-        const boundingBox = this.handleCenter(geometry);
-        this.scene.add(this.getMesh(geometry, material, boundingBox));
-        this.revealViewer();
-      },
-      (event) => this.updateLoadProgress(event),
-      () => this.handleLoadError(),
-    );
-
-    this.initControls();
-    this.renderer.setAnimationLoop(() => {
-      this.controls.update();
-      this.renderer.render(this.scene, this.camera);
-    });
   }
 
-  private static getMesh(
-    geometry: BufferGeometry,
-    material: MeshPhongMaterial,
-    boundingBox: Box3,
-  ): Mesh {
-    const size = new Vector3();
-    boundingBox.getSize(size);
-    const largestDimension = Math.max(size.x, size.y, size.z) || 1;
-    const scale = this.TARGET_SIZE / largestDimension;
-
-    const mesh = new Mesh(geometry, material);
-    mesh.position.set(0, 0, 0);
-    mesh.rotation.set(0, 0, 0);
-    mesh.scale.setScalar(scale);
-
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-
-    return mesh;
-  }
-
-  private static initCamera(width: number, height: number): void {
-    this.camera = new PerspectiveCamera(35, width / height, 1, 500);
-
-    // Z is up for objects intended to be 3D printed.
-    this.camera.up.set(0, 0, 1);
-    this.camera.position.copy(this.HOME_CAMERA_POSITION);
-
-    this.camera.add(new PointLight(0xffffff, 0.8));
-  }
-
-  private static initScene(): void {
-    this.scene = new Scene();
-    this.scene.background = new Color(0xffffff);
-    this.scene.fog = new Fog(0xa0a0a0, 10, 50);
-
-    this.scene.add(new HemisphereLight(0xffffff, 0x000000, 1));
-    this.scene.add(new AmbientLight(0xffffff));
-
-    const directionalLight = new DirectionalLight(0xffffff, 1);
-    directionalLight.castShadow = true;
-    directionalLight.shadow.camera.top = 44;
-    directionalLight.shadow.camera.bottom = -14;
-    directionalLight.shadow.camera.left = -14;
-    directionalLight.shadow.camera.right = 14;
-    directionalLight.shadow.camera.near = 0.1;
-    directionalLight.shadow.camera.far = 40;
-    directionalLight.shadow.bias = -0.002;
-    directionalLight.position.set(0, 20, 20);
-    this.scene.add(directionalLight);
-  }
-
-  private static applyEnvironmentLighting(): void {
-    const pmremGenerator = new PMREMGenerator(this.renderer);
-    this.scene.environment = pmremGenerator.fromScene(
-      new RoomEnvironment(),
-      0.04,
-    ).texture;
-    pmremGenerator.dispose();
-  }
-
-  private static initControls(): void {
-    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.target.copy(this.HOME_CAMERA_TARGET);
-    this.controls.autoRotate = true;
-    this.controls.update();
-
-    document
-      .querySelector<HTMLElement>('[data-action="rotate"]')
-      ?.classList.add("kadmos-toolbar-button--active");
-  }
-
-  private static updateLoadProgress(event: ProgressEvent): void {
-    if (!event.lengthComputable) {
+  private static applySection(): void {
+    if (!this.viewer) {
       return;
     }
 
-    const percent = Math.round((event.loaded / event.total) * 100);
-    this.getSpinnerProgress().textContent = `${percent}%`;
+    if (!this.isPressed("section")) {
+      this.viewer.setSection(undefined);
+      return;
+    }
+
+    const axis = (this.query('.kadmos-segmented [aria-pressed="true"]')?.dataset
+      .axis ?? "z") as SectionAxis;
+    const range = this.query<HTMLInputElement>(".kadmos-section-range");
+    this.viewer.setSection(axis, Number(range?.value ?? 500) / 1000);
   }
 
-  private static handleLoadError(): void {
+  private static applyPlate(): void {
+    if (!this.viewer) {
+      return;
+    }
+
+    const select = this.query<HTMLSelectElement>(".kadmos-plate-select");
+    const plate = !this.isPressed("plate")
+      ? undefined
+      : select?.value === CUSTOM_PLATE
+        ? this.customPlate
+        : BUILD_PLATES[select?.value ?? ""];
+
+    this.showFit(this.viewer.setBuildPlate(plate), plate);
+  }
+
+  /** Puts every tool back to its default for a freshly loaded model. */
+  private static resetTools(
+    viewer: Viewer,
+    stats: ModelStats,
+    options: ModelOptions,
+  ): void {
+    for (const action of ["wireframe", "ortho", "section", "measure"]) {
+      this.setPressed(action, false);
+    }
+    this.setPressed("rotate", viewer.autoRotate);
+
+    const texture = parseFlag(options.texture) ?? true;
+    viewer.setTexture(texture);
+    this.setPressed("texture", texture);
+
+    const dimensions = parseFlag(options.dimensions) ?? true;
+    viewer.setDimensionsVisible(dimensions);
+    this.setPressed("dimensions", dimensions);
+    this.showPanel("section", false);
+    this.showPanel("measure", false);
+
+    const range = this.query<HTMLInputElement>(".kadmos-section-range");
+    if (range) {
+      range.value = "500";
+    }
+
+    this.showStats(stats);
+
+    const plate = parseBuildVolume(options.plate);
+    if (plate) {
+      this.selectPlate(plate);
+    }
+    this.setPressed("plate", plate !== undefined);
+    this.showPanel("plate", plate !== undefined);
+    this.applyPlate();
+  }
+
+  private static selectPlate(plate: BuildVolume): void {
+    const select = this.query<HTMLSelectElement>(".kadmos-plate-select");
+    if (!select) {
+      return;
+    }
+
+    const presetId = Object.keys(BUILD_PLATES).find(
+      (id) => BUILD_PLATES[id] === plate,
+    );
+    if (presetId) {
+      select.value = presetId;
+      return;
+    }
+
+    this.customPlate = plate;
+    let option = Array.from(select.options).find(
+      (candidate) => candidate.value === CUSTOM_PLATE,
+    );
+    if (!option) {
+      option = new Option("", CUSTOM_PLATE);
+      select.add(option);
+    }
+    option.text = plate.name;
+    select.value = CUSTOM_PLATE;
+  }
+
+  private static showStats(stats: ModelStats): void {
+    const { size, volume, triangles } = stats;
+    const sizeElement = this.query(".kadmos-info-size");
+    const metaElement = this.query(".kadmos-info-meta");
+
+    if (sizeElement) {
+      sizeElement.textContent = `${formatLength(size.x)} × ${formatLength(size.y)} × ${formatLength(size.z)} mm`;
+    }
+    if (metaElement) {
+      metaElement.textContent = `${formatVolume(volume)} · ${triangles.toLocaleString()} triangles`;
+    }
+  }
+
+  private static showFit(
+    fit: FitResult | undefined,
+    plate: BuildVolume | undefined,
+  ): void {
+    const element = this.query(".kadmos-info-fit");
+    if (!element) {
+      return;
+    }
+
+    element.hidden = !fit || !plate;
+    if (!fit || !plate) {
+      return;
+    }
+
+    element.classList.toggle("kadmos-info-fit--ok", fit.fits);
+    element.classList.toggle("kadmos-info-fit--bad", !fit.fits);
+
+    if (fit.fits) {
+      element.textContent = fit.rotated
+        ? `Fits ${plate.name} when rotated 90°`
+        : `Fits ${plate.name}`;
+      return;
+    }
+
+    const overflow = (["x", "y", "z"] as const)
+      .filter((axis) => fit.overflow[axis] > 0)
+      .map(
+        (axis) =>
+          `${axis.toUpperCase()} +${formatLength(fit.overflow[axis])} mm`,
+      )
+      .join(", ");
+    element.textContent = `Too large for ${plate.name}: ${overflow}`;
+  }
+
+  private static isPressed(action: string): boolean {
+    return (
+      this.query(`[data-action="${action}"]`)?.getAttribute("aria-pressed") ===
+      "true"
+    );
+  }
+
+  private static setPressed(action: string, pressed: boolean): void {
+    const button = this.query(`[data-action="${action}"]`);
+    button?.setAttribute("aria-pressed", String(pressed));
+    button?.classList.toggle("kadmos-toolbar-button--active", pressed);
+  }
+
+  private static showPanel(name: string, visible: boolean): void {
+    const panel = this.query(`[data-panel="${name}"]`);
+    if (panel) {
+      panel.hidden = !visible;
+    }
+  }
+
+  private static showError(message: string): void {
     this.getSpinner().classList.remove("kadmos-spinner--visible");
     this.getErrorWrapper().classList.add("kadmos-error-wrapper--visible");
-    this.getError().innerHTML = "<p>The model could not be loaded</p>";
+
+    const text = document.createElement("p");
+    text.textContent = message;
+    const content: Node[] = [text];
+
+    if (!this.fullPage) {
+      const hint = document.createElement("p");
+      hint.className = "kadmos-error-hint";
+      hint.textContent = "Press Esc or click to close";
+      content.push(hint);
+    }
+
+    this.getError().replaceChildren(...content);
   }
 
-  private static revealViewer(): void {
+  private static revealViewer(token: number): void {
     setTimeout(() => {
+      if (token !== this.loadToken) {
+        return;
+      }
+
       this.getSpinner().classList.remove("kadmos-spinner--visible");
       setTimeout(() => {
-        this.getStlWrapper().classList.add("stlBackdrop--visible");
-      }, 250);
+        if (token === this.loadToken) {
+          this.getStlWrapper().classList.add("stlBackdrop--visible");
+        }
+      }, FADE_MS);
     }, 100);
   }
 
@@ -422,59 +704,19 @@ export class Kadmos {
     this.getErrorWrapper().classList.remove("kadmos-error-wrapper--visible");
   }
 
-  private static hideBackdrop(): void {
-    this.getStlWrapper().classList.remove("backdrop--fade-out");
-    setTimeout(() => {
-      this.getModelContainer().innerHTML = "";
-    }, 250);
+  private static close(): void {
+    // Invalidates any in-flight load and pending reveal.
+    this.loadController?.abort();
+    this.loadToken++;
 
-    if (this.renderer) {
-      this.renderer.setAnimationLoop(null);
-    }
-  }
+    this.getSpinner().classList.remove("kadmos-spinner--visible");
+    this.getErrorWrapper().classList.remove("kadmos-error-wrapper--visible");
+    this.getStlWrapper().classList.remove("stlBackdrop--visible");
 
-  private static handleEvents(): void {
-    const triggers = Array.from(document.getElementsByClassName(this.selector));
-
-    if (triggers.length === 0) {
-      return;
-    }
-
-    triggers.forEach((trigger) => {
-      trigger.addEventListener("click", (event) => {
-        // Read from currentTarget (the element the listener is on),
-        // not target, since a click can bubble up from a nested
-        // child that doesn't carry the data attributes.
-        const target = event.currentTarget as HTMLElement;
-        const filePath = target.dataset.file;
-        const color = target.dataset.color;
-
-        if (!filePath) {
-          return;
-        }
-
-        this.handleModel(
-          filePath,
-          this.normalizeColor(color ?? null),
-          800,
-          600,
-        );
-        this.getStlWrapper().classList.add("backdrop--fade-in");
-      });
-    });
-
-    document.addEventListener("keyup", (event) => {
-      if (event.key === "Escape") {
-        this.hideBackdrop();
-      }
-    });
-
-    this.getStlWrapper().addEventListener("click", (event) => {
-      if (event.target !== event.currentTarget) {
-        return;
-      }
-
-      this.hideBackdrop();
-    });
+    window.clearTimeout(this.closeTimer);
+    this.closeTimer = window.setTimeout(() => {
+      this.viewer?.stop();
+      this.viewer?.clearModel();
+    }, FADE_MS);
   }
 }

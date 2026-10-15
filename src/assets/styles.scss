@@ -1,13 +1,10 @@
 @use "./animations" as *;
 @use "./@core" as *;
 
+// Not positioned itself: every child that needs to cover the viewport is
+// position: fixed on its own, and a full-viewport wrapper would swallow
+// clicks meant for the host page (e.g. popup-mode triggers).
 #kadmos-app {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  top: 0;
-
   --kadmos-bg: #f5f6f8;
   --kadmos-surface: #ffffff;
   --kadmos-fg: #1e2530;

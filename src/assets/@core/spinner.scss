@@ -13,13 +13,22 @@
   background: var(--kadmos-bg);
   visibility: hidden;
   opacity: 0;
-  transition:
-    opacity 0.25s linear,
-    visibility 0.25s linear;
+  // Still "visible" while fading out; don't swallow clicks meanwhile.
+  pointer-events: none;
+
+  // Only fade once Kadmos has enabled it (see enableTransitions): if this
+  // stylesheet arrives after first paint, hiding must be instant, not a
+  // fade-out of a still-visible element.
+  &.kadmos-animated {
+    transition:
+      opacity 0.25s linear,
+      visibility 0.25s linear;
+  }
 
   &.kadmos-spinner--visible {
     visibility: visible;
     opacity: 1;
+    pointer-events: auto;
   }
 
   .spinner {
