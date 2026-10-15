@@ -1,6 +1,6 @@
 {
   "name": "kadmos",
-  "version": "1.1.1",
+  "version": "2.0.0",
   "description": "Zero-configuration 3D model viewer for STL and 3MF files, built on three.js: auto-fit framing, realistic lighting, dimensions, section views, measuring and build-plate fit checks.",
   "keywords": [
     "stl",
@@ -40,7 +40,8 @@
     "/dist",
     "/package.json",
     "/README.md",
-    "/LICENSE"
+    "/LICENSE",
+    "/CHANGELOG.md"
   ],
   "repository": {
     "type": "git",
