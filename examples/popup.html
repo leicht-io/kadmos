@@ -1,0 +1,64 @@
+<!doctype html>
+<html dir="ltr" lang="en-GB">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Kadmos demo: open STL and 3MF models in a popup 3D viewer."
+    />
+    <title>Kadmos popup demo</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="demo.css" />
+  </head>
+  <body>
+    <nav>
+      <a href="./">Full page</a>
+      <a href="popup.html">Popup</a>
+      <a href="inline.html">Inline</a>
+    </nav>
+
+    <h1>Popup mode</h1>
+    <p>
+      Each link opens the viewer in a popup. Without JavaScript they would
+      simply download the model.
+    </p>
+    <ul>
+      <li>
+        <a
+          class="kadmos-trigger"
+          href="models/knot.stl"
+          data-file="models/knot.stl"
+          data-color="#3b6ea5"
+          >Knot (STL)</a
+        >
+      </li>
+      <li>
+        <a
+          class="kadmos-trigger"
+          href="models/plate-and-peg.3mf"
+          data-file="models/plate-and-peg.3mf"
+          data-plate="prusa-mini"
+          >Plate and peg (two-color 3MF, on a Prusa MINI+ plate)</a
+        >
+      </li>
+    </ul>
+
+    <div id="kadmos-app">
+      <div id="kadmos-spinner">
+        <div class="spinner">
+          <div class="dot1"></div>
+          <div class="dot2"></div>
+        </div>
+      </div>
+
+      <div id="kadmos-content"></div>
+
+      <div id="kadmos-error-wrapper">
+        <div id="kadmos-error"></div>
+      </div>
+    </div>
+
+    <script type="module" src="popup.ts"></script>
+  </body>
+</html>
